@@ -1,0 +1,2672 @@
+######################## Bitmap Display Configuration ########################
+# - Unit width in pixels:       256
+# - Unit height in pixels:      256
+# - Display width in pixels:    8
+# - Display height in pixels:   8
+# - Base Address for Display:   0x10008000 ($gp)
+##############################################################################
+
+.data
+displayAddress:     .word 0x10008000
+keyboardAddress:    .word 0xffff0000
+gameOverBackground: .word 0x1D1A31
+gameOverText:       .word 0xF08CAE
+retryText:          .word 0xC1A5A9
+
+#colours
+beige:              .word 0xEEE0CB
+periwinkle:         .word 0x7D80DA
+wisteria:           .word 0xB0A3D4
+pink:               .word 0xF45B69
+amaranth:           .word 0x89043D
+mauve:              .word 0x6E4555
+borderColour:       .word 0x474350
+outlineColour:      .word 0xC1A5A9
+
+borderX0:           .word 2
+borderY0:           .word 3
+previewX:           .word 18
+previewY:           .word 4
+
+blocksStartX:       .word 5
+blocksX:            .word 5
+blocksStartY:       .word 4
+blocksY:            .word 4
+
+nextTopColor1:       .word 0
+nextMidColor1:       .word 0
+nextBotColor1:       .word 0
+x1:                  .word 16
+y1:                  .word 4
+
+nextTopColor2:       .word 0
+nextMidColor2:       .word 0
+nextBotColor2:       .word 0
+x2:                  .word 19
+y2:                  .word 4
+
+nextTopColor3:       .word 0
+nextMidColor3:       .word 0
+nextBotColor3:       .word 0
+x3:                  .word 22
+y3:                  .word 4
+
+nextTopColor4:       .word 0
+nextMidColor4:       .word 0
+nextBotColor4:       .word 0
+x4:                  .word 25
+y4:                  .word 4
+
+COLS:               .word 6
+ROWS:               .word 26
+
+Grid_width:         .word 6
+Grid_height:        .word 24
+grid: .space 4096
+matching_grid: .space 4096
+white: .word 0xFFFFFF
+
+paused:             .word 0 # 0 = running, 1 = paused
+screen_backup:      .space 4096
+
+match_flag: .word 0
+
+score:      .word 0
+removed_count:.word 0 
+cascade_count: .word -2
+
+
+##############################################################################
+# Code
+##############################################################################
+.text
+Main:
+j Initialization
+
+Initialization:
+li $s7, 0       # gravity counter
+li $s6, 20      # when to update gravity
+li $s5, 10      # how many blocks spawn
+li  $t0, 0
+sw  $t0, score
+
+
+
+lw $t0, blocksStartX
+sw $t0, blocksX
+lw $t0, blocksStartY
+sw $t0, blocksY
+
+jal DrawBorder
+jal DrawScore
+jal DrawScoreOnesDigit
+jal DrawScoreTensDigit
+jal DrawScoreHundredsDigit
+jal NextPixelsBox
+jal SavedBox
+
+jal InitialDrawPixel
+jal MainLoop
+
+MainLoop:
+#jal DrawOutline
+jal CheckKeyboard
+addi $s7, $s7, 1
+beq $s7, $s6, PressSGravity
+jal Sleep
+jal MainLoop
+
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Sleep ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+Sleep:
+li $v0, 32 		       	   # Sleep
+li $a0, 16 		   	       # Sleep for 16 ms = 1/60 s
+syscall
+jr $ra
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ CheckKeyboard ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+CheckKeyboard:
+lw $t0, keyboardAddress  
+lw $t1, 0($t0)       
+bne $t1, 1, NoKey           # if not pressed, just return
+
+CheckInput:
+addi $t0, $t0, 4           
+lw $t2, 0($t0)            
+beq $t2, 0x71, PressQ       # q is pressed
+beq $t2, 0x77, PressW	    # w is pressed
+beq $t2, 0x61, PressA		# a is pressed
+beq $t2, 0x73, PressS		# s is pressed
+beq $t2, 0x64, PressD		# d is pressed
+beq $t2, 0x72, PressR       # r is pressed
+beq $t2, 0x70, PressP       # p is pressed
+beq $t2, 0x63, Saved        # c is pressed
+jr $ra                      # other key = ignore and return
+
+PressQ:
+li $v0, 10                  # Quit gracefully
+syscall
+
+PressR:
+jal ClearScreen
+
+PressP:
+jal SaveScreen
+jal PausedScreen
+jal RestoreScreen
+jr $ra
+    
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Rotate (W) ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+PressW:
+# rotate the colours downwards
+lw $t0, displayAddress
+lw $t1, blocksY             # current y
+li $t2, 32
+mul $t1, $t1, $t2           # t1 = y * 32
+
+lw $t3, blocksX             # current x
+add $t1, $t1, $t3           # t1 = y * 32 + x
+
+sll $t1, $t1, 2             #get the byte value     
+addu $t0, $t0, $t1           #add it display address
+
+# Current colours
+lw $t4, 0($t0)              # top colour
+lw $t5, 128($t0)            # middle; 128 pixels
+lw $t6, 256($t0)            # bottom; 256 pixels
+
+# Rotate up
+sw $t6, 0($t0)              # new top = previous bottom
+sw $t4, 128($t0)            # new middle = previous top
+sw $t5, 256($t0)            # new bottom = previous middle
+
+jr $ra
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Move Left (A) ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+PressA:
+lw $t4, blocksX             # current x
+lw $t5, blocksY             # current y
+
+# left inner limit: borderX0 + 1
+lw $t7, borderX0
+addi $t7, $t7, 1  
+
+# If at left inner limit
+beq $t4, $t7, PressA_End
+
+lw $t0, displayAddress      # $t0 = 0x10008000
+
+# Find old column address to erase + colour copy
+li $t1, 32
+mul $t2, $t5, $t1           # t2 = y * 32
+add $t2, $t2, $t4           # t2 = y*32 + x
+sll $t2, $t2, 2              
+addu $t3, $t0, $t2          # t3 = address of top old block
+
+# check cell to the left of each gem:
+# left of top pixel
+addiu $t6, $t3, -4          # top pixel one pixel left (-4)
+lw $t7, 0($t6)
+bne $t7, $zero, PressA_End  # something there
+
+# left of middle pixel
+addiu $t6, $t3, 124         # middle pixel one left (128 + (-4) = 124)
+lw $t7, 0($t6)
+bne $t7, $zero, PressA_End
+
+# left of bottom pixel
+addiu $t6, $t3, 252         # bottom pixel one left (256 + (-4) = 252)
+lw $t7, 0($t6)
+bne $t7, $zero, PressA_End
+
+
+# Read current colours
+lw $t8, 0($t3)              # top
+lw $t9, 128($t3)            # middle
+lw $s1, 256($t3)            # bottom
+
+# Erase old column by colouring it black
+move $s0, $zero
+sw $s0, 0($t3)
+sw $s0, 128($t3)
+sw $s0, 256($t3)
+
+# update current x to x = x - 1
+addi $t4, $t4, -1
+sw $t4, blocksX
+
+# Compute new column address and redraw colours 
+li $t1, 32
+mul $t2, $t5, $t1           # t2 = y * 32
+add $t2, $t2, $t4           # t2 = y * 32 + newX
+sll $t2, $t2, 2        
+addu $t3, $t0, $t2          # t3 = address of top new block
+
+sw $t8, 0($t3)            # top = old top
+sw $t9, 128($t3)            # mid = old mid
+sw $s1, 256($t3)            # bottom = old bottom
+
+PressA_End:
+jr $ra
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Move Down (S) ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+PressS:
+lw $t4, blocksX             # current x
+lw $t5, blocksY             # current y
+ 
+# Compute lower limit: borderY0 + 26
+lw $t7, borderY0
+addi $t7, $t7, 26  
+
+# If at bottom limit
+beq $t5, $t7, PressS_End
+
+lw $t0, displayAddress 
+
+# Find old column address and erase and copy colours
+li $t1, 32 #32 pixels per row
+mul $t2, $t5, $t1           # t2 = y * 32
+add $t2, $t2, $t4           # t2 = y * 32 + x
+sll $t2, $t2, 2         
+addu $t3, $t0, $t2          # byte address of top old block
+
+# check if there is a gem below
+addiu $t6, $t3, 384         # 3 * 128 = 3 rows down
+lw $t7, 0($t6)              #check what is underneath
+bne $t7, $zero, PressS_End
+
+# Read current colours
+lw $t8, 0($t3)              # top
+lw $t9, 128($t3)            # middle
+lw $s1, 256($t3)            # bottom
+
+# Erase old column by colouring black
+move $s0, $zero
+sw $s0, 0($t3)
+sw $s0, 128($t3)
+sw $s0, 256($t3)
+
+# Update y value to be y = y + 1
+addi $t5, $t5, 1         
+sw $t5, blocksY
+
+# Get new address for the column and redraw it
+li $t1, 32
+mul $t2, $t5, $t1           # t2 = y * 32
+add $t2, $t2, $t4           # t2 = y * 32 + new X
+sll $t2, $t2, 2  
+addu $t3, $t0, $t2          # address of top new block
+
+sw $t8, 0($t3)              # top = old top
+sw $t9, 128($t3)            # mid = old mid
+sw $s1, 256($t3)            # bottom = old bottom
+jr $ra
+    
+PressS_End:
+
+addi $s5, $s5, -1
+lw $t4, blocksStartX      # x spawn
+lw $t5, blocksStartY      # y spawn
+lw $t0, displayAddress 
+    
+# Compute address of top spawn cell
+li $t1, 32
+mul $t2, $t5, $t1          # t2 = y * 32
+add $t2, $t2, $t4          # t2 = y * 32 + x
+sll $t2, $t2, 2            
+addu $t3, $t0, $t2          # address of top spawn pixel
+
+lw $t6, 0($t3)          # top
+lw $t7, 128($t3)          # middle
+lw $t8, 256($t3)          # bottom
+
+# If any is non-zero/non-black  = game over
+or $t9, $t6, $t7
+or $t9, $t9, $t8
+bne $t9, $zero, GameOver
+
+#reading the columns that are at the bottom
+lw $t4, blocksX          # x
+lw $t5, blocksY          # y
+
+lw $t0, displayAddress   # base again
+li $t1, 32
+mul $t2, $t5, $t1         # y * 32
+add $t2, $t2, $t4         # y * 32 + x
+sll $t2, $t2, 2
+addu $t3, $t0, $t2         # address of top landed gem
+
+# Read final column colours
+lw $t6, 0($t3)         # top gem colour
+lw $t7, 128($t3)         # middle
+lw $t8, 256($t3)         # bottom
+
+lw $t0, blocksStartX
+sw $t0, blocksX
+lw $t0, blocksStartY
+sw $t0, blocksY
+jal MoveStored
+
+jr   $ra
+
+
+#copy of presss just for the use of gravity
+PressSGravity:
+lw $t4, blocksX             # current x
+lw $t5, blocksY             # current y
+ 
+# Compute lower limit: borderY0 + 26
+lw $t7, borderY0
+addi $t7, $t7, 26  
+
+# If at bottom limit
+beq $t5, $t7, PressS_EndGravity
+lw $t0, displayAddress 
+
+# Find old column address and erase and copy colours
+li $t1, 32
+mul $t2, $t5, $t1           # t2 = y * 32
+add $t2, $t2, $t4           # t2 = y * 32 + x
+sll $t2, $t2, 2         
+addu $t3, $t0, $t2          # address of top old block
+
+# check if there is a gem below
+addiu $t6, $t3, 384         # 3 * 128 = 3 rows down
+lw $t7, 0($t6)              #check what is underneath
+bne $t7, $zero, PressS_EndGravity
+
+# Read current colours
+lw $t8, 0($t3)              # top
+lw $t9, 128($t3)            # middle
+lw $s1, 256($t3)            # bottom
+
+# Erase old column by colouring black
+move $s0, $zero
+sw $s0, 0($t3)
+sw $s0, 128($t3)
+sw $s0, 256($t3)
+
+# Update y value to be y = y + 1
+addi $t5, $t5, 1         
+sw $t5, blocksY
+
+# Get new address for the column and redraw it
+li $t1, 32
+mul $t2, $t5, $t1           # t2 = y * 32
+add $t2, $t2, $t4           # t2 = y * 32 + newX
+sll $t2, $t2, 2  
+addu $t3, $t0, $t2          # t3 = address of top new block
+
+sw $t8, 0($t3)              # top = old top
+sw $t9, 128($t3)            # mid = old mid
+sw $s1, 256($t3)            # bottom = old bottom
+sub $s7, $s7, $s6
+jr $ra
+    
+PressS_EndGravity:
+sub $s7, $s7, $s6
+addi $s5, $s5, -1
+lw $t4, blocksStartX      # x spawn
+lw $t5, blocksStartY      # y spawn
+lw $t0, displayAddress 
+    
+# Compute address of top spawn cell
+li $t1, 32
+mul $t2, $t5, $t1          # t2 = y * 32
+add $t2, $t2, $t4          # t2 = y * 32 + x
+sll $t2, $t2, 2            
+addu $t3, $t0, $t2          # t3 = addr of top spawn pixel
+
+lw $t6, 0($t3)          # top
+lw $t7, 128($t3)          # middle
+lw $t8, 256($t3)          # bottom
+
+# If any is non-zero  = game over
+or $t9, $t6, $t7
+or $t9, $t9, $t8
+bne $t9, $zero, GameOver
+
+#reading the columns that are at the bottom
+lw $t4, blocksX          # x
+lw $t5, blocksY          # y
+
+lw $t0, displayAddress   
+li $t1, 32
+mul $t2, $t5, $t1         # y * 32
+add $t2, $t2, $t4         # y * 32 + x
+sll $t2, $t2, 2
+addu $t3, $t0, $t2         # address of top landed gem
+
+# Read final column colours
+lw $t6, 0($t3)         # top gem colour
+lw $t7, 128($t3)         # middle
+lw $t8, 256($t3)         # bottom
+
+lw $t0, blocksStartX
+sw $t0, blocksX
+lw $t0, blocksStartY
+sw $t0, blocksY
+jal MoveStored
+jr   $ra
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Move Right (D) ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+PressD:
+lw $t4, blocksX     #current x
+lw $t5, blocksY     #current y
+
+# Compute right limit
+lw $t7, borderX0
+addi $t7, $t7, 6  
+
+# If at limit end
+beq $t4, $t7, PressD_End
+lw $t0, displayAddress  
+
+# get old column and erase and redraw it
+li $t1, 32
+mul $t2, $t5, $t1             # t2 = y * 32
+add $t2, $t2, $t4             # t2 = y * 32 + x
+sll $t2, $t2, 2         
+addu $t3, $t0, $t2             #address of top old block
+
+
+# check to see if there is a column to the right
+# right of top block
+addiu $t6, $t3, 4             # one pixel right
+lw $t7, 0($t6)
+bne $t7, $zero, PressD_End   #cant move
+
+# rught of middle block
+addiu $t6, $t3, 132          # one row down, one left
+lw $t7, 0($t6)
+bne $t7, $zero, PressD_End
+
+# right of bottom block
+addiu $t6, $t3, 260          # two rows down, one left
+lw $t7, 0($t6)
+bne $t7, $zero, PressD_End
+
+# Read current colours
+lw $t8, 0($t3)             # top
+lw $t9, 128($t3)             # middle
+lw $s1, 256($t3)             #bottom
+
+# Erase old column by colouring it black
+move $s0, $zero
+sw $s0, 0($t3)
+sw $s0, 128($t3)
+sw $s0, 256($t3)
+
+# update current x value
+addi $t4, $t4, 1              # x = x + 1
+sw $t4, blocksX
+
+# find new column address and redraw ti
+li $t1, 32
+mul $t2, $t5, $t1             # t2 = y * 32
+add $t2, $t2, $t4             # t2 = y * 32 + newX
+sll $t2, $t2, 2             
+addu $t3, $t0, $t2        
+
+sw $t8, 0($t3)             # top = old top
+sw $t9, 128($t3)             # middle = old middle
+sw $s1, 256($t3)             # bottom = old bottom
+
+PressD_End:
+jr $ra
+
+NoKey:
+jr  $ra
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ DrawBorder ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+DrawBorder:
+lw $t0, displayAddress  
+lw $v1, borderColour    
+
+lw $t2, borderX0            # x0 
+lw $t3, borderY0            # y0
+
+#address of (x0, y0)
+li $t4, 32
+mul $t5, $t3, $t4            # t5 = y0 * 32
+add $t5, $t5, $t2            # t5 = y0 * 32 + x0
+sll $t5, $t5, 2              # t5 = index * 4
+addu $t6, $t0, $t5           # t6 = (x0, y0) for current row
+li $t7, 0                    # row counter; 26 rows total
+
+RowLoop_8x15:
+beq $t7, 26, BorderDone     # if row == 26 then done
+
+beq $t7, $zero, FullRow
+li $t8, 25
+beq $t7, $t8, FullRow
+
+# middle rows: no middle
+sw $v1, 0($t6)               # left border at x0
+addiu $t9, $t6, 28           # right border at x0 + 7; offset 7 * 4 = 28 bytes
+sw $v1, 0($t9)
+j AfterRow_8x15
+
+# top and bottom rows
+FullRow:
+move $t9, $t6                # current pixel in row
+li $t8, 0                    # column counter 0 - 7
+
+FullRowLoop:
+beq $t8, 8, AfterRow_8x15
+sw $v1, 0($t9)
+addiu $t9, $t9, 4             # next pixel
+addiu $t8, $t8, 1
+j FullRowLoop
+
+# next row
+AfterRow_8x15:
+addiu $t6, $t6, 128           # move down one row (32 * 4)
+addiu $t7, $t7, 1             # row++
+j RowLoop_8x15
+
+BorderDone:
+jr $ra
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ RandomColour ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+RandomColour:
+li $v0, 42            # syscall 42: random int
+li $a0, 0             # lower bound
+li $a1, 6             # upper bound (exclusive); 0 - 5
+syscall                 # result in $a0
+
+move $t1, $a0           # $t1 = random index
+
+beq $t1, $zero, Beige       # 0 = beige
+li $t2, 1
+beq $t1, $t2, Periwinkle    # 1 = periwinkle
+li $t2, 2
+beq $t1, $t2, Wisteria      # 2 = wisteria
+li $t2, 3
+beq $t1, $t2, Pink          # 3 = pink
+li $t2, 4
+beq $t1, $t2, Amaranth      # 4 = amaranth
+j Mauve                   # if none of the above
+
+Beige:
+lw $v0, beige
+jr $ra
+
+Periwinkle:
+lw $v0, periwinkle
+jr $ra
+
+Wisteria:
+lw $v0, wisteria
+jr $ra
+
+Pink:
+lw $v0, pink
+jr $ra
+
+Amaranth:
+lw $v0, amaranth
+jr $ra
+
+Mauve:
+lw $v0, mauve
+jr $ra
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ InitialDrawPixel ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+InitialDrawPixel:
+lw $t0, displayAddress  
+
+lw $t4, blocksX             # x current
+lw $t5, blocksY             # y current 
+
+li $t1, 32
+mul $t2, $t5, $t1            # t2 = y * 32
+add $t2, $t2, $t4            # t2 = y * 32 + x
+sll $t2, $t2, 2              # * 4 bytes
+addu $t0, $t0, $t2            # address of top pixel of column
+
+# Draw exactly 3 random-coloured pixels downward
+li $s0, 0
+
+InitialPixelLoop:
+beq  $s0, 3, InitialRandomPixels1      # stop after 3 blocks
+jal  RandomColour             # $v0 = colour
+sw $v0, 0($t0)              # paint pixel
+addiu $t0, $t0, 128           # move down one row (32 * 4)
+addiu $s0, $s0, 1
+j InitialPixelLoop
+
+InitialRandomPixels1:
+lw $t0, displayAddress
+lw $t4, x1
+lw $t5, y1
+li $t1, 32
+mul $t2, $t5, $t1            # t2 = y * 32
+add $t2, $t2, $t4            # t2 = y * 32 + x
+sll $t2, $t2, 2              # * 4 bytes
+addu $t0, $t0, $t2         
+li $s0, 0
+
+InitialPixelLoop1:
+beq  $s0, 3, InitialRandomPixels2      # stop after 3 blocks
+jal  RandomColour             # $v0 = colour
+sw $v0, 0($t0)              # paint pixel
+addiu $t0, $t0, 128           # move down one row (32 * 4)
+addiu $s0, $s0, 1
+j InitialPixelLoop1
+
+InitialRandomPixels2:
+lw $t0, displayAddress
+lw $t4, x2
+lw $t5, y2
+li $t1, 32
+mul $t2, $t5, $t1            # t2 = y * 32
+add $t2, $t2, $t4            # t2 = y*32 + x
+sll $t2, $t2, 2              # * 4 bytes
+addu $t0, $t0, $t2            # address of top pixel of column
+li $s0, 0
+
+InitialPixelLoop2:
+beq  $s0, 3, InitialRandomPixels3      # stop after 3 blocks
+jal  RandomColour             # $v0 = colour
+sw $v0, 0($t0)              # paint pixel
+addiu $t0, $t0, 128           # move down one row (32 * 4)
+addiu $s0, $s0, 1
+j InitialPixelLoop2
+
+InitialRandomPixels3:
+lw $t0, displayAddress
+lw $t4, x3
+lw $t5, y3
+li $t1, 32
+mul $t2, $t5, $t1            # t2 = y * 32
+add $t2, $t2, $t4            # t2 = y*32 + x
+sll $t2, $t2, 2              # * 4 bytes
+addu $t0, $t0, $t2            # address of top pixel of column
+li $s0, 0
+
+InitialPixelLoop3:
+beq  $s0, 3, InitialRandomPixels4      # stop after 3 blocks
+jal  RandomColour             # $v0 = colour
+sw $v0, 0($t0)              # paint pixel
+addiu $t0, $t0, 128           # move down one row (32 * 4)
+addiu $s0, $s0, 1
+j InitialPixelLoop3
+
+InitialRandomPixels4:
+lw $t0, displayAddress
+lw $t4, x4
+lw $t5, y4
+li $t1, 32
+mul $t2, $t5, $t1            # t2 = y * 32
+add $t2, $t2, $t4            # t2 = y*32 + x
+sll $t2, $t2, 2              # * 4 bytes
+addu $t0, $t0, $t2            #address of top pixel of column
+li $s0, 0
+
+InitialPixelLoop4:
+beq  $s0, 3, InitialDonePixels # stop after 3 blocks
+jal  RandomColour             # $v0 = colour
+sw $v0, 0($t0)              # paint pixel
+addiu $t0, $t0, 128           # move down one row (32 * 4)
+addiu $s0, $s0, 1
+j InitialPixelLoop4
+
+InitialDonePixels:
+jal MainLoop
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ DrawPixel ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+DrawPixel:
+lw $t0, displayAddress
+
+lw $t4, x4             # x current 
+lw $t5, y4             # y current 
+
+li $t1, 32
+mul $t2, $t5, $t1            # t2 = y * 32
+add $t2, $t2, $t4            # t2 = y * 32 + x
+sll $t2, $t2, 2              # * 4 bytes
+addu $t0, $t0, $t2            # address of top pixel of column
+
+li $s0, 0   #counter
+
+PixelLoop:
+beq  $s0, 3, DonePixels       # stop after 3 blocks
+jal  RandomColour             # $v0 = colour
+sw $v0, 0($t0)              # paint pixel
+addiu $t0, $t0, 128           # move down one row (32 * 4)
+addiu $s0, $s0, 1
+j PixelLoop
+
+DonePixels:
+jal MainLoop
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ MoveStored ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+MoveStored:
+jal ResolveAllMatches
+lw $t0, displayAddress
+lw $t1, x1
+lw $t2, y1
+lw $t3, blocksStartX
+lw $t4, blocksStartY
+mul $t2, $t2, 32 
+add $t2, $t2, $t1
+sll $t2, $t2, 2     #top coordinate of first stored top block
+mul $t4, $t4, 32
+add $t4, $t4, $t3
+sll $t4, $t4, 2     #top coordinate of dropped top block
+
+#read current colour and erase
+move $s0, $zero
+add $t0, $t0, $t2
+lw $t5, 0($t0)
+sw $s0, 0($t0)
+addi $t0, $t0, 128
+lw $t6, 0($t0)
+sw $s0, 0($t0)
+addi $t0, $t0, 128
+lw $t7, 0($t0)
+sw $s0, 0($t0)
+
+#draw colours into playing field
+lw $t0, displayAddress
+add $t0, $t0, $t4
+sw $t5, 0($t0)
+addi $t0, $t0, 128
+sw $t6, 0($t0)
+addi $t0, $t0, 128
+sw $t7, 0($t0)
+
+
+#2
+lw $t0, displayAddress
+lw $t1, x2
+lw $t2, y2
+lw $t3, x1
+lw $t4, y1
+mul $t2, $t2, 32 
+add $t2, $t2, $t1
+sll $t2, $t2, 2     #top coordinate of first stored top block
+mul $t4, $t4, 32
+add $t4, $t4, $t3
+sll $t4, $t4, 2     #top coordinate of dropped top block
+
+#read current colour and erase
+move $s0, $zero
+add $t0, $t0, $t2
+lw $t5, 0($t0)
+sw $s0, 0($t0)
+addi $t0, $t0, 128
+lw $t6, 0($t0)
+sw $s0, 0($t0)
+addi $t0, $t0, 128
+lw $t7, 0($t0)
+sw $s0, 0($t0)
+
+#draw colours into playing field
+lw $t0, displayAddress
+add $t0, $t0, $t4
+sw $t5, 0($t0)
+addi $t0, $t0, 128
+sw $t6, 0($t0)
+addi $t0, $t0, 128
+sw $t7, 0($t0)
+
+
+#3
+lw $t0, displayAddress
+lw $t1, x3
+lw $t2, y3
+lw $t3, x2
+lw $t4, y2
+mul $t2, $t2, 32 
+add $t2, $t2, $t1
+sll $t2, $t2, 2     #top coordinate of first stored top block
+mul $t4, $t4, 32
+add $t4, $t4, $t3
+sll $t4, $t4, 2     #top coordinate of dropped top block
+
+#read current colour and erase
+move $s0, $zero
+add $t0, $t0, $t2
+lw $t5, 0($t0)
+sw $s0, 0($t0)
+addi $t0, $t0, 128
+lw $t6, 0($t0)
+sw $s0, 0($t0)
+addi $t0, $t0, 128
+lw $t7, 0($t0)
+sw $s0, 0($t0)
+
+#draw colours into playing field
+lw $t0, displayAddress
+add $t0, $t0, $t4
+sw $t5, 0($t0)
+addi $t0, $t0, 128
+sw $t6, 0($t0)
+addi $t0, $t0, 128
+sw $t7, 0($t0)
+
+
+#4
+lw $t0, displayAddress
+lw $t1, x4
+lw $t2, y4
+lw $t3, x3
+lw $t4, y3
+mul $t2, $t2, 32 
+add $t2, $t2, $t1
+sll $t2, $t2, 2     #top coordinate of first stored top block
+mul $t4, $t4, 32
+add $t4, $t4, $t3
+sll $t4, $t4, 2     #top coordinate of dropped top block
+
+#read current colour and erase
+move $s0, $zero
+add $t0, $t0, $t2
+lw $t5, 0($t0)
+sw $s0, 0($t0)
+addi $t0, $t0, 128
+lw $t6, 0($t0)
+sw $s0, 0($t0)
+addi $t0, $t0, 128
+lw $t7, 0($t0)
+sw $s0, 0($t0)
+
+#draw colours into playing field
+lw $t0, displayAddress
+add $t0, $t0, $t4
+sw $t5, 0($t0)
+addi $t0, $t0, 128
+sw $t6, 0($t0)
+addi $t0, $t0, 128
+sw $t7, 0($t0)
+
+jal DrawPixel
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Saved ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+Saved:
+lw $t0, displayAddress
+lw $t1, blocksY     #current y
+lw $t2, blocksX     #current x
+
+mult $t1, $t1, 32
+add $t1, $t1, $t2
+sll $t1, $t1, 2     #current byte address
+add $t0, $t0, $t1   #$current address on display address of moving block
+
+lw $t3, displayAddress
+li $t2, 3128        # saved box byte address
+lw $t1, $t2($t3)    # check colour of top block of saved column
+
+
+lw $t0, displayAddress
+lw $t1, blocksY     #current y
+lw $t2, blocksX     #current x
+
+mult $t1, $t1, 32
+add $t1, $t1, $t2
+sll $t1, $t1, 2     #current byte address
+add $t0, $t0, $t1   #$current address on display address of moving block
+
+lw $t1, 0($t0)      #top colour
+lw $t2, 128($t0)    #middle colour
+lw $t3, 256($t0)    #bottom colour
+
+lw $t4, displayAddress
+lw $t6, 3128($t4)   #colour of top saved coloum
+lw $t7, 3256($t4)   #colour of middle saved coloum
+lw $t8, 3384($t4)   #colour of bottom saved coloum
+sw $t1, 3128($t4)
+sw $t2, 3256($t4)
+sw $t3, 3384($t4)
+
+li $t5, 0               # black / empty
+sw $t5, 0($t0)          # clear top
+sw $t5, 128($t0)        # clear middle
+sw $t5, 256($t0)        # clear bottom
+
+sw $t6, 0($t0)          # saved top to moving top
+sw $t7, 128($t0)        # saved middle to moving middle
+sw $t8, 256($t0)        # saved bottom to moving bottom
+
+beq $t6, $zero, MoveStored1
+
+j SavedDone
+
+MoveStored1:
+lw $t0, displayAddress
+lw $t1, x1
+lw $t2, y1
+lw $t3, blocksX
+lw $t4, blocksY
+mul $t2, $t2, 32 
+add $t2, $t2, $t1
+sll $t2, $t2, 2     #top coordinate of first stored top block
+mul $t4, $t4, 32
+add $t4, $t4, $t3
+sll $t4, $t4, 2     #top coordinate of dropped top block
+
+#read current colour and erase
+move $s0, $zero
+add $t0, $t0, $t2
+lw $t5, 0($t0)
+sw $s0, 0($t0)
+addi $t0, $t0, 128
+lw $t6, 0($t0)
+sw $s0, 0($t0)
+addi $t0, $t0, 128
+lw $t7, 0($t0)
+sw $s0, 0($t0)
+
+#draw colours into playing field
+lw $t0, displayAddress
+add $t0, $t0, $t4
+sw $t5, 0($t0)
+addi $t0, $t0, 128
+sw $t6, 0($t0)
+addi $t0, $t0, 128
+sw $t7, 0($t0)
+
+
+#2
+lw $t0, displayAddress
+lw $t1, x2
+lw $t2, y2
+lw $t3, x1
+lw $t4, y1
+mul $t2, $t2, 32 
+add $t2, $t2, $t1
+sll $t2, $t2, 2     #top coordinate of first stored top block
+mul $t4, $t4, 32
+add $t4, $t4, $t3
+sll $t4, $t4, 2     #top coordinate of dropped top block
+
+#read current colour and erase
+move $s0, $zero
+add $t0, $t0, $t2
+lw $t5, 0($t0)
+sw $s0, 0($t0)
+addi $t0, $t0, 128
+lw $t6, 0($t0)
+sw $s0, 0($t0)
+addi $t0, $t0, 128
+lw $t7, 0($t0)
+sw $s0, 0($t0)
+
+#draw colours into playing field
+lw $t0, displayAddress
+add $t0, $t0, $t4
+sw $t5, 0($t0)
+addi $t0, $t0, 128
+sw $t6, 0($t0)
+addi $t0, $t0, 128
+sw $t7, 0($t0)
+
+
+#3
+lw $t0, displayAddress
+lw $t1, x3
+lw $t2, y3
+lw $t3, x2
+lw $t4, y2
+mul $t2, $t2, 32 
+add $t2, $t2, $t1
+sll $t2, $t2, 2     #top coordinate of first stored top block
+mul $t4, $t4, 32
+add $t4, $t4, $t3
+sll $t4, $t4, 2     #top coordinate of dropped top block
+
+#read current colour and erase
+move $s0, $zero
+add $t0, $t0, $t2
+lw $t5, 0($t0)
+sw $s0, 0($t0)
+addi $t0, $t0, 128
+lw $t6, 0($t0)
+sw $s0, 0($t0)
+addi $t0, $t0, 128
+lw $t7, 0($t0)
+sw $s0, 0($t0)
+
+#draw colours into playing field
+lw $t0, displayAddress
+add $t0, $t0, $t4
+sw $t5, 0($t0)
+addi $t0, $t0, 128
+sw $t6, 0($t0)
+addi $t0, $t0, 128
+sw $t7, 0($t0)
+
+
+#4
+lw $t0, displayAddress
+lw $t1, x4
+lw $t2, y4
+lw $t3, x3
+lw $t4, y3
+mul $t2, $t2, 32 
+add $t2, $t2, $t1
+sll $t2, $t2, 2     #top coordinate of first stored top block
+mul $t4, $t4, 32
+add $t4, $t4, $t3
+sll $t4, $t4, 2     #top coordinate of dropped top block
+
+#read current colour and erase
+move $s0, $zero
+add $t0, $t0, $t2
+lw $t5, 0($t0)
+sw $s0, 0($t0)
+addi $t0, $t0, 128
+lw $t6, 0($t0)
+sw $s0, 0($t0)
+addi $t0, $t0, 128
+lw $t7, 0($t0)
+sw $s0, 0($t0)
+
+#draw colours into playing field
+lw $t0, displayAddress
+add $t0, $t0, $t4
+sw $t5, 0($t0)
+addi $t0, $t0, 128
+sw $t6, 0($t0)
+addi $t0, $t0, 128
+sw $t7, 0($t0)
+jal DrawPixel
+
+SavedDone:
+jr $ra
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ SavedBox ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+SavedBox:
+lw $t0, displayAddress
+lw $t1, borderColour
+sw $t1, 2864($t0)
+sw $t1, 2868($t0)
+sw $t1, 2872($t0)
+sw $t1, 2876($t0)
+sw $t1, 2880($t0)
+
+sw $t1, 2992($t0)
+sw $t1, 3008($t0)
+
+sw $t1, 3120($t0)
+sw $t1, 3136($t0)
+
+sw $t1, 3248($t0)
+sw $t1, 3264($t0)
+
+sw $t1, 3376($t0)
+sw $t1, 3392($t0)
+
+sw $t1, 3504($t0)
+sw $t1, 3520($t0)
+
+sw $t1, 3632($t0)
+sw $t1, 3636($t0)
+sw $t1, 3640($t0)
+sw $t1, 3644($t0)
+sw $t1, 3648($t0)
+
+jr $ra
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ PausedScreen ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+PausedScreen:
+lw $t0, displayAddress
+lw $t4, gameOverBackground
+lw $t5, gameOverText
+li $t1, 0
+LoopPause:
+sw $t4, 0($t0)
+addi $t0, $t0, 4
+beq $t0, 0x10009000, Pause
+jal LoopPause
+
+Pause:
+lw $t0, displayAddress
+sw $t5, 820($t0)
+sw $t5, 824($t0)
+sw $t5, 836($t0)
+sw $t5, 840($t0)
+
+sw $t5, 948($t0)
+sw $t5, 952($t0)
+sw $t5, 964($t0)
+sw $t5, 968($t0)
+
+sw $t5, 1076($t0)
+sw $t5, 1080($t0)
+sw $t5, 1092($t0)
+sw $t5, 1096($t0)
+
+sw $t5, 1204($t0)
+sw $t5, 1208($t0)
+sw $t5, 1220($t0)
+sw $t5, 1224($t0)
+
+sw $t5, 1332($t0)
+sw $t5, 1336($t0)
+sw $t5, 1348($t0)
+sw $t5, 1352($t0)
+
+sw $t5, 1460($t0)
+sw $t5, 1464($t0)
+sw $t5, 1476($t0)
+sw $t5, 1480($t0)
+
+sw $t5, 1588($t0)
+sw $t5, 1592($t0)
+sw $t5, 1604($t0)
+sw $t5, 1608($t0)
+
+sw $t5, 1716($t0)
+sw $t5, 1720($t0)
+sw $t5, 1732($t0)
+sw $t5, 1736($t0)
+
+sw $t5, 2188($t0)
+sw $t5, 2192($t0)
+sw $t5, 2208($t0)
+sw $t5, 2212($t0)
+sw $t5, 2224($t0)
+sw $t5, 2236($t0)
+sw $t5, 2248($t0)
+sw $t5, 2252($t0)
+sw $t5, 2256($t0)
+sw $t5, 2268($t0)
+sw $t5, 2272($t0)
+sw $t5, 2280($t0)
+sw $t5, 2284($t0)
+sw $t5, 2288($t0)
+sw $t5, 2312($t0)
+sw $t5, 2324($t0)
+sw $t5, 2332($t0)
+sw $t5, 2344($t0)
+sw $t5, 2352($t0)
+sw $t5, 2364($t0)
+sw $t5, 2372($t0)
+sw $t5, 2392($t0)
+sw $t5, 2408($t0)
+sw $t5, 2420($t0)
+sw $t5, 2440($t0)
+sw $t5, 2452($t0)
+sw $t5, 2460($t0)
+sw $t5, 2472($t0)
+sw $t5, 2480($t0)
+sw $t5, 2492($t0)
+sw $t5, 2500($t0)
+sw $t5, 2520($t0)
+sw $t5, 2536($t0)
+sw $t5, 2548($t0)
+sw $t5, 2568($t0)
+sw $t5, 2580($t0)
+sw $t5, 2588($t0)
+sw $t5, 2600($t0)
+sw $t5, 2608($t0)
+sw $t5, 2620($t0)
+sw $t5, 2632($t0)
+sw $t5, 2636($t0)
+sw $t5, 2648($t0)
+sw $t5, 2652($t0)
+sw $t5, 2656($t0)
+sw $t5, 2664($t0)
+sw $t5, 2676($t0)
+sw $t5, 2696($t0)
+sw $t5, 2700($t0)
+sw $t5, 2704($t0)
+sw $t5, 2716($t0)
+sw $t5, 2720($t0)
+sw $t5, 2724($t0)
+sw $t5, 2728($t0)
+sw $t5, 2736($t0)
+sw $t5, 2748($t0)
+sw $t5, 2768($t0)
+sw $t5, 2776($t0)
+sw $t5, 2792($t0)
+sw $t5, 2804($t0)
+sw $t5, 2824($t0)
+sw $t5, 2844($t0)
+sw $t5, 2856($t0)
+sw $t5, 2864($t0)
+sw $t5, 2876($t0)
+sw $t5, 2896($t0)
+sw $t5, 2904($t0)
+sw $t5, 2920($t0)
+sw $t5, 2932($t0)
+sw $t5, 2952($t0)
+sw $t5, 2972($t0)
+sw $t5, 2984($t0)
+sw $t5, 2996($t0)
+sw $t5, 3000($t0)
+sw $t5, 3012($t0)
+sw $t5, 3016($t0)
+sw $t5, 3020($t0)
+sw $t5, 3036($t0)
+sw $t5, 3040($t0)
+sw $t5, 3048($t0)
+sw $t5, 3052($t0)
+sw $t5, 3056($t0)
+
+PauseWait:
+lw $t7, keyboardAddress
+lw $t8, 0($t7)
+beq $t8, $zero, PauseWait
+lw $t9, 4($t7)
+
+#p = unpause
+li $s0, 0x70            # 'p'
+beq  $t9, $s0, PauseExit
+
+# r = restart when paused
+li $s0, 0x72                # 'r'
+beq  $t9, $s0, PressR
+
+# q = quit when paused
+li $s0, 0x71                # 'q'
+beq $t9, $s0, PressQ
+
+j PauseWait
+
+PauseExit:
+jal RestoreScreen
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ GameOver ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+GameOver:
+li $v0, 10
+jal GameOverScreen
+syscall
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~ GameOverScreen ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+GameOverScreen:
+lw $t0, displayAddress
+lw $t4, gameOverBackground
+lw $t5, gameOverText
+lw $t6, retryText
+li $t1, 0
+LoopGameOver:
+sw $t4, 0($t0)
+addi $t0, $t0, 4
+beq $t0, 0x10009000, Game
+jal LoopGameOver
+
+Game:
+lw $t0, displayAddress
+sw $t5, 412($t0)
+sw $t5, 416($t0)
+sw $t5, 432($t0)
+sw $t5, 436($t0)
+sw $t5, 452($t0)
+sw $t5, 460($t0)
+sw $t5, 476($t0)
+sw $t5, 480($t0)
+sw $t5, 536($t0)
+sw $t5, 556($t0)
+sw $t5, 568($t0)
+sw $t5, 576($t0)
+sw $t5, 584($t0)
+sw $t5, 592($t0)
+sw $t5, 600($t0)
+sw $t5, 664($t0)
+sw $t5, 684($t0)
+sw $t5, 696($t0)
+sw $t5, 704($t0)
+sw $t5, 712($t0)
+sw $t5, 720($t0)
+sw $t5, 728($t0)
+sw $t5, 792($t0)
+sw $t5, 800($t0)
+sw $t5, 804($t0)
+sw $t5, 812($t0)
+sw $t5, 824($t0)
+sw $t5, 832($t0)
+sw $t5, 848($t0)
+sw $t5, 856($t0)
+sw $t5, 860($t0)
+sw $t5, 864($t0)
+sw $t5, 920($t0)
+sw $t5, 932($t0)
+sw $t5, 940($t0)
+sw $t5, 944($t0)
+sw $t5, 948($t0)
+sw $t5, 952($t0)
+sw $t5, 960($t0)
+sw $t5, 976($t0)
+sw $t5, 984($t0)
+sw $t5, 1048($t0)
+sw $t5, 1060($t0)
+sw $t5, 1068($t0)
+sw $t5, 1080($t0)
+sw $t5, 1088($t0)
+sw $t5, 1104($t0)
+sw $t5, 1112($t0)
+sw $t5, 1180($t0)
+sw $t5, 1184($t0)
+sw $t5, 1196($t0)
+sw $t5, 1208($t0)
+sw $t5, 1216($t0)
+sw $t5, 1232($t0)
+sw $t5, 1244($t0)
+sw $t5, 1248($t0)
+
+Over:
+sw $t5, 1816($t0)
+sw $t5, 1820($t0)
+sw $t5, 1832($t0)
+sw $t5, 1848($t0)
+sw $t5, 1860($t0)
+sw $t5, 1864($t0)
+sw $t5, 1876($t0)
+sw $t5, 1880($t0)
+sw $t5, 1896($t0)
+sw $t5, 1940($t0)
+sw $t5, 1952($t0)
+sw $t5, 1960($t0)
+sw $t5, 1976($t0)
+sw $t5, 1984($t0)
+sw $t5, 2000($t0)
+sw $t5, 2012($t0)
+sw $t5, 2024($t0)
+sw $t5, 2068($t0)
+sw $t5, 2080($t0)
+sw $t5, 2088($t0)
+sw $t5, 2104($t0)
+sw $t5, 2112($t0)
+sw $t5, 2128($t0)
+sw $t5, 2140($t0)
+sw $t5, 2152($t0)
+sw $t5, 2196($t0)
+sw $t5, 2208($t0)
+sw $t5, 2220($t0)
+sw $t5, 2228($t0)
+sw $t5, 2240($t0)
+sw $t5, 2244($t0)
+sw $t5, 2248($t0)
+sw $t5, 2256($t0)
+sw $t5, 2260($t0)
+sw $t5, 2264($t0)
+sw $t5, 2280($t0)
+sw $t5, 2324($t0)
+sw $t5, 2336($t0)
+sw $t5, 2348($t0)
+sw $t5, 2356($t0)
+sw $t5, 2368($t0)
+sw $t5, 2384($t0)
+sw $t5, 2392($t0)
+sw $t5, 2408($t0)
+sw $t5, 2452($t0)
+sw $t5, 2464($t0)
+sw $t5, 2476($t0)
+sw $t5, 2484($t0)
+sw $t5, 2496($t0)
+sw $t5, 2512($t0)
+sw $t5, 2524($t0)
+sw $t5, 2584($t0)
+sw $t5, 2588($t0)
+sw $t5, 2608($t0)
+sw $t5, 2628($t0)
+sw $t5, 2632($t0)
+sw $t5, 2640($t0)
+sw $t5, 2652($t0)
+sw $t5, 2664($t0)
+
+
+Retry:
+sw $t6, 3276($t0)
+sw $t6, 3344($t0)
+sw $t6, 3348($t0)
+sw $t6, 3372($t0)
+sw $t6, 3376($t0)
+sw $t6, 3384($t0)
+sw $t6, 3388($t0)
+sw $t6, 3392($t0)
+sw $t6, 3400($t0)
+sw $t6, 3404($t0)
+sw $t6, 3408($t0)
+sw $t6, 3420($t0)
+sw $t6, 3424($t0)
+sw $t6, 3432($t0)
+sw $t6, 3440($t0)
+sw $t6, 3468($t0)
+sw $t6, 3496($t0)
+sw $t6, 3512($t0)
+sw $t6, 3516($t0)
+sw $t6, 3520($t0)
+sw $t6, 3532($t0)
+sw $t6, 3544($t0)
+sw $t6, 3560($t0)
+sw $t6, 3568($t0)
+sw $t6, 3596($t0)
+sw $t6, 3612($t0)
+sw $t6, 3616($t0)
+sw $t6, 3624($t0)
+sw $t6, 3640($t0)
+sw $t6, 3660($t0)
+sw $t6, 3672($t0)
+sw $t6, 3688($t0)
+sw $t6, 3696($t0)
+sw $t6, 3724($t0)
+sw $t6, 3752($t0)
+sw $t6, 3768($t0)
+sw $t6, 3772($t0)
+sw $t6, 3776($t0)
+sw $t6, 3788($t0)
+sw $t6, 3792($t0)
+sw $t6, 3800($t0)
+sw $t6, 3820($t0)
+sw $t6, 3824($t0)
+sw $t6, 3952($t0)
+sw $t6, 4072($t0)
+sw $t6, 4076($t0)
+sw $t6, 4080($t0)
+
+keyboardLoop:
+jal CheckKeyboard
+jal keyboardLoop
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ DrawScore ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+DrawScore:
+lw $t0, displayAddress
+lw $t1, gameOverText
+sw $t1, 1460($t0)
+sw $t1, 1464($t0)
+sw $t1, 1476($t0)
+sw $t1, 1488($t0)
+sw $t1, 1500($t0)
+sw $t1, 1504($t0)
+sw $t1, 1520($t0)
+sw $t1, 1588($t0)
+sw $t1, 1600($t0)
+sw $t1, 1612($t0)
+sw $t1, 1620($t0)
+sw $t1, 1628($t0)
+sw $t1, 1636($t0)
+sw $t1, 1644($t0)
+sw $t1, 1716($t0)
+sw $t1, 1720($t0)
+sw $t1, 1728($t0)
+sw $t1, 1740($t0)
+sw $t1, 1748($t0)
+sw $t1, 1756($t0)
+sw $t1, 1760($t0)
+sw $t1, 1772($t0)
+sw $t1, 1776($t0)
+sw $t1, 1848($t0)
+sw $t1, 1856($t0)
+sw $t1, 1868($t0)
+sw $t1, 1876($t0)
+sw $t1, 1884($t0)
+sw $t1, 1892($t0)
+sw $t1, 1900($t0)
+sw $t1, 1972($t0)
+sw $t1, 1976($t0)
+sw $t1, 1988($t0)
+sw $t1, 2000($t0)
+sw $t1, 2012($t0)
+sw $t1, 2020($t0)
+sw $t1, 2032($t0)
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ NextPixelsBox ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+NextPixelsBox:
+lw $t0, displayAddress   
+lw $v1, borderColour    
+
+li $t2, 14           # x0 
+li $t3, 2           # y0
+
+li $t4, 32
+mul $t5, $t3, $t4            #y0 * 32
+add $t5, $t5, $t2            # y0 * 32 + x0
+
+sll $t5, $t5, 2              # * 4
+addu $t6, $t0, $t5       
+
+li $t7, 0                    # row counter; 15 rows total
+
+RowLoop_6x13:
+beq $t7, 7, BorderDones     # if row == 5 = done
+
+
+beq $t7, $zero, FullRows
+li $t8, 6
+beq $t7, $t8, FullRows
+
+# middle rows: no middle
+sw $v1, 0($t6)               # left border at x0
+addiu $t9, $t6, 52           # right border at x0 + 7; offset 7 * 4 = 28 bytes
+sw $v1, 0($t9)
+j AfterRow
+
+FullRows:
+move $t9, $t6                # t9 = current pixel in row
+li $t8, 0                    # column counter 0..7
+
+FullRowLoops:
+beq $t8, 14, AfterRow
+sw $v1, 0($t9)
+addiu $t9, $t9, 4             # next pixel (4 bytes)
+addiu $t8, $t8, 1
+j FullRowLoops
+
+# next row
+AfterRow:
+addiu $t6, $t6, 128           # move down one row (32 * 4 bytes)
+addiu $t7, $t7, 1             # row++
+j RowLoop_6x13
+
+BorderDones:
+jr $ra
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ SaveScreen ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+SaveScreen:
+lw $t0, displayAddress     
+la $t1, screen_backup     
+li $t2, 1024 
+
+SaveScreen_loop:
+lw $t3, 0($t0)              # read pixel from display
+sw $t3, 0($t1)              # store into backup
+
+addi $t0, $t0, 4              # next display word
+addi $t1, $t1, 4              # next backup word
+addi $t2, $t2, -1
+bgtz $t2, SaveScreen_loop
+
+jr $ra
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~ RestoreScreen ~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+RestoreScreen:
+la $t0, screen_backup       
+lw $t1, displayAddress      
+li $t2, 1024
+
+RestoreScreen_loop:
+lw $t3, 0($t0)              # read from backup
+sw $t3, 0($t1)              # write to display
+
+addi $t0, $t0, 4
+addi $t1, $t1, 4
+addi $t2, $t2, -1
+bgtz $t2, RestoreScreen_loop
+
+jal MainLoop
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~ ClearScreen ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+ClearScreen:
+lw $t0, displayAddress
+li $t1, 0x000000
+li $t2, 1024
+jal ClearScreenLoop
+
+ClearScreenLoop:
+sw $t1, 0($t0)
+addi $t0, $t0, 4
+addi $t2, $t2, -1
+bgtz $t2, ClearScreenLoop
+
+jal Main
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ FindMatches ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+ResolveAllMatches:
+addiu $sp, $sp, -4
+sw $ra, 0($sp)
+li $s4, 0                # cascade_count = 0
+sw $s4, cascade_count
+li $s5, 0                # match cycle = 0    
+
+ResolveLoop:
+jal FindMatches
+lw $t0, match_flag
+beq $t0, $zero, Done_Resolve     # if no matches indicated in match_flag loop
+
+move $t1, $s5           # t1 = firstWaveDone
+beq $t1, $zero, FirstWave
+
+lw $t2, cascade_count
+addi $t2, $t2, 1 #adding 1 to the amount of match rounds
+sw $t2, cascade_count
+j AfterCascadeCheck
+
+FirstWave:
+li $s5, 1                  # firstWaveDone = true
+
+AfterCascadeCheck:
+# Continue looping until no more matches
+j ResolveLoop
+
+Done_Resolve:
+lw $t3, cascade_count
+li $t4, 1
+blt $t3, $t4, NoCascadeBonus   # if cascade_count < 1 then no bonus
+
+# Award +5 once
+lw $t5, score
+addi $t5, $t5, 5
+sw $t5, score
+
+NoCascadeBonus:
+jal DrawScoreOnesDigit
+jal DrawScoreTensDigit
+jal DrawScoreHundredsDigit
+lw $ra, 0($sp)
+addiu $sp, $sp, 4
+jr $ra
+
+FindMatches:
+addiu $sp, $sp, -4
+sw $ra, 0($sp)
+# run all match finders
+li $t0, 0
+sw $t0, removed_count
+
+jal FindHorizontal
+jal FindVertical
+jal FindUpperDiagonal
+jal FindLowerDiagonal
+
+# delete any marked blocks
+jal DeleteMarkedBlocks
+jal ApplyGravity
+    
+ScoreUpdate:
+# add how many gems removed to the score
+lw $t1, removed_count
+lw $t2, score
+add $t2, $t2, $t1
+sw $t2, score
+jal DrawScoreOnesDigit
+jal DrawScoreTensDigit
+jal DrawScoreHundredsDigit
+lw $ra, 0($sp)
+addiu $sp, $sp, 4
+jr $ra
+
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Horizontal ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+FindHorizontal:
+addiu $sp, $sp, -4
+sw $ra, 0($sp)
+la $t0, matching_grid
+lw $t9, displayAddress
+lw $t1, borderX0
+addi $t1, $t1, 1
+lw $t2, borderY0
+addi $t2, $t2, 1
+lw $t6, white          # white marker
+
+li $t7, 24             # grid height
+li $t8, 6              # grid width
+
+RowLoop:
+li $t4, 0              # column = 0
+
+ColumnLoop:
+bge $t4, 4, NextRow    # only check col 0 - 3
+
+lw $t3, borderX0
+addi $t3, $t3, 1
+add  $t3, $t3, $t4  # x = borderX0 + 1 + col
+
+move $t5, $t2 # y = borderY0 +1 + rowIndex
+
+li  $t0, 32
+mul $t0, $t5, $t0
+add $t0, $t0, $t3
+sll $t0, $t0, 2
+add $t0, $t0, $t9 
+
+# load 3 colours
+lw $t1, 0($t0)         # colour 0
+lw $t3, 4($t0)         # colour 1
+lw $t5, 8($t0)         # colour 2
+
+# check if they match
+beq $t1, $zero, NextCol
+bne $t1, $t3, NextCol
+bne $t1, $t5, NextCol
+
+# convert screen row to grid row: gridRow = t2 - (borderY0+1)
+lw  $t5, borderY0
+addi $t5, $t5, 1
+sub  $t5, $t2, $t5      # grid row 0 - 23
+
+# idx0 = (gridRow * 6 + col)
+mul $t8, $t5, 6
+add $t8, $t8, $t4
+sll $t8, $t8, 2
+la $t0, matching_grid
+add $t0, $t0, $t8
+sw $t6, 0($t0)
+
+# idx1 = (gridRo * 6 + col+1)
+addi $t1, $t4, 1
+mul $t8, $t5, 6
+add $t8, $t8, $t1
+sll $t8, $t8, 2
+la $t0, matching_grid
+add $t0, $t0, $t8
+sw $t6, 0($t0)
+
+# idx2 = (gridRow * 6 + col+2)
+addi $t1, $t4, 2
+mul $t8, $t5, 6
+add $t8, $t8, $t1
+sll $t8, $t8, 2
+la $t0, matching_grid
+add $t0, $t0, $t8
+sw $t6, 0($t0)
+
+NextCol:
+addi $t4, $t4, 1
+j ColumnLoop
+
+NextRow:
+addi $t2, $t2, 1
+blt $t2, 28, RowLoop    # scan rows(24 rows)
+lw $ra, 0($sp)
+addiu $sp, $sp, 4
+jr $ra
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Vertical ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+FindVertical:
+addiu $sp, $sp, -4
+sw $ra, 0($sp)
+lw $t9, displayAddress   
+lw $t6, white            
+li $t4, 0                # col = 0   
+
+ColumnLoop_V:
+bge $t4, 6, Done_Vertical # done all 6 columns
+
+# start screen y = borderY0 + 1 
+lw $t2, borderY0
+addi $t2, $t2, 1           # screen y
+
+RowLoop_V:
+# convert screen y to gridRow: gridRow = y - (borderY0 + 1)
+lw $t0, borderY0
+addi $t0, $t0, 1
+sub  $t5, $t2, $t0         # gridRow 
+bge  $t5, 22, NextCol_V
+
+# compute screen x = borderX0 + 1 + col
+lw $t0, borderX0
+addi $t0, $t0, 1
+add $t0, $t0, $t4         # t0 = x
+
+#colour0 at (x, y)
+li $t1, 32
+mul $t3, $t2, $t1         # y * 32
+add $t3, $t3, $t0         # y * 32 + x
+sll $t3, $t3, 2
+add $t3, $t3, $t9        
+lw $t1, 0($t3)           # t1 = colour0
+
+# if black, no match
+beq $t1, $zero, NextRow_V
+
+#colour1 at (x, y + 1)
+addi $t7, $t2, 1           # y+1
+li $t8, 32
+mul $t3, $t7, $t8         # (y+1) * 32
+add $t3, $t3, $t0         # + x
+sll $t3, $t3, 2
+add $t3, $t3, $t9
+lw $t3, 0($t3)           # t3 = colour1
+bne $t1, $t3, NextRow_V
+
+#colour2 at (x, y + 2)
+addi $t7, $t2, 2           # y+2
+li $t8, 32
+mul $t3, $t7, $t8         # (y + 2) * 32
+add $t3, $t3, $t0         # + x
+sll $t3, $t3, 2
+add $t3, $t3, $t9
+lw $t7, 0($t3)           # t7 = colour2
+
+bne $t1, $t7, NextRow_V
+
+# idx0 = (gridRow * 6 + col)
+mul $t8, $t5, 6
+add $t8, $t8, $t4
+sll $t8, $t8, 2
+la $t3, matching_grid
+add $t3, $t3, $t8
+sw $t6, 0($t3)
+
+# idx1 = ((gridRow + 1) * 6 + col)
+addi $t1, $t5, 1
+mul $t8, $t1, 6
+add $t8, $t8, $t4
+sll $t8, $t8, 2
+la $t3, matching_grid
+add $t3, $t3, $t8
+sw $t6, 0($t3)
+
+# idx2 = ((gridRow + 2) * 6 + col)
+addi $t1, $t5, 2
+mul $t8, $t1, 6
+add $t8, $t8, $t4
+sll $t8, $t8, 2
+la $t3, matching_grid
+add $t3, $t3, $t8
+sw $t6, 0($t3)
+
+NextRow_V:
+addi $t2, $t2, 1           # y++
+j RowLoop_V
+
+NextCol_V:
+addi $t4, $t4, 1           # col++
+j ColumnLoop_V
+
+Done_Vertical:
+lw $ra, 0($sp)
+addiu $sp, $sp, 4
+jr $ra
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Diagonal~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+FindLowerDiagonal:
+addiu $sp, $sp, -4
+sw $ra, 0($sp)
+lw $t9, displayAddress   
+lw $t6, white             
+li $t1, 0                  # row = 0 - 21
+
+RowLoop_Diag:
+bge $t1, 22, Done_Diag      # stop after row 21
+li $t2, 0                  # col = 0 - 3
+
+ColLoop_Diag:
+bge $t2, 4, NextRow_Diag    # only cols 0 - 3
+
+# y1 = borderY0 + 1 + row
+lw    $t7, borderY0
+addi  $t7, $t7, 1
+add   $t7, $t7, $t1         
+
+# x1 = borderX0 + 1 + col
+lw    $t8, borderX0
+addi  $t8, $t8, 1
+add   $t8, $t8, $t2       
+
+# index1 = (y1 * 32 + x1) * 4
+li    $t4, 32
+mul   $t4, $t7, $t4          # y1 * 32
+add   $t4, $t4, $t8          # + x1
+sll   $t4, $t4, 2
+addu  $t0, $t4, $t9  
+
+lw    $t3, 0($t0)            # t3 = colourA
+beq   $t3, $zero, NextCol_Diag   # empty = no match
+
+# p1 + 132
+addiu $t4, $t0, 132          # p2
+lw $t4, 0($t4)            # t4 = colour2
+bne $t3, $t4, NextCol_Diag
+
+#p1 + 264
+addiu $t5, $t0, 264          # p3
+lw $t5, 0($t5)            # t5 = colour3
+bne $t3, $t5, NextCol_Diag
+
+# Match = Mark them in matching_grid with white
+# idx0 = (row * 6 + col)
+mul $t7, $t1, 6
+add $t7, $t7, $t2
+sll $t7, $t7, 2
+la $t8, matching_grid
+add $t8, $t8, $t7
+sw $t6, 0($t8)
+
+# idx1 = ((row + 1) * 6 + (col + 1))
+addi $t7, $t1, 1           # row + 1
+mul $t7, $t7, 6
+addi $t8, $t2, 1           # col + 1
+add $t7, $t7, $t8
+sll $t7, $t7, 2
+la $t8, matching_grid
+add $t8, $t8, $t7
+sw$t6, 0($t8)
+
+# idx2 = ((row + 2) * 6 + (col + 2))
+addi $t7, $t1, 2           # row + 2
+mul $t7, $t7, 6
+addi $t8, $t2, 2           # col + 2
+add $t7, $t7, $t8
+sll $t7, $t7, 2
+la $t8, matching_grid
+add $t8, $t8, $t7
+sw $t6, 0($t8)
+
+NextCol_Diag:
+addi $t2, $t2, 1           # col++
+j ColLoop_Diag
+
+NextRow_Diag:
+addi $t1, $t1, 1           # row++
+j RowLoop_Diag
+
+Done_Diag:
+lw $ra, 0($sp)
+addiu $sp, $sp, 4
+jr $ra
+    
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Diagonal  ( / ) ~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+FindUpperDiagonal:
+addiu $sp, $sp, -4
+sw $ra, 0($sp)
+lw $t9, displayAddress 
+lw $t6, white   
+li $t1, 2                  # row = 2 - 23
+
+RowLoop_LDiag:
+bgt $t1, 23, Done_LDiag
+li $t2, 0                  # col = 0 - 3
+
+ColLoop_LDiag:
+bgt $t2, 3, NextRow_LDiag
+
+# y1 = borderY0 + 1 + row
+lw $t7, borderY0
+addi $t7, $t7, 1
+add $t7, $t7, $t1          # y1
+
+# x1 = borderX0 + 1 + col
+lw $t8, borderX0
+addi $t8, $t8, 1
+add $t8, $t8, $t2          # x1
+
+#display + (y1 * 32 + x1)*4
+li $t4, 32
+mul $t4, $t7, $t4
+add $t4, $t4, $t8
+sll $t4, $t4, 2
+addu $t0, $t4, $t9          # p1
+
+lw $t3, 0($t0)            # colour1
+beq $t3, $zero, NextCol_LDiag
+
+addiu $t4, $t0, -124         # p2
+lw $t4, 0($t4)            # colour2
+bne $t3, $t4, NextCol_LDiag
+
+addiu $t5, $t0, -248         # p3
+lw $t5, 0($t5)            # colour3
+bne $t3, $t5, NextCol_LDiag
+
+#match
+# idx0 = row * 6 + col
+mul $t7, $t1, 6
+add $t7, $t7, $t2
+sll $t7, $t7, 2
+la $t8, matching_grid
+add $t8, $t8, $t7
+sw $t6, 0($t8)
+
+# idx1 = (row - 1) * 6 + (col + 1)
+addi $t7, $t1, -1
+mul $t7, $t7, 6
+addi $t8, $t2, 1
+add $t7, $t7, $t8
+sll $t7, $t7, 2
+la $t8, matching_grid
+add $t8, $t8, $t7
+sw $t6, 0($t8)
+
+# idx2 = (row - 2) * 6 + (col + 2)
+addi $t7, $t1, -2
+mul $t7, $t7, 6
+addi $t8, $t2, 2
+add $t7, $t7, $t8
+sll $t7, $t7, 2
+la $t8, matching_grid
+add $t8, $t8, $t7
+sw $t6, 0($t8)
+
+NextCol_LDiag:
+addi $t2, $t2, 1
+j ColLoop_LDiag
+
+NextRow_LDiag:
+addi $t1, $t1, 1
+j  RowLoop_LDiag
+
+Done_LDiag:
+lw $ra, 0($sp)
+addiu $sp, $sp, 4
+jr $ra
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~ DeleteMarkedBlocks ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+DeleteMarkedBlocks:
+la $t0, matching_grid     
+lw $t9, displayAddress    
+lw $t7, white            
+li $t6, 0                 # black (erase)
+li $t1, 0                 # row = 0
+li $s2, 0
+sw $s2, match_flag
+
+RowLoop_Delete:
+bge $t1, 24, Done_Delete   # 24 rows
+li $t2, 0                 # col = 0
+
+ColLoop_Delete:
+bge $t2, 6, NextRow_Delete # 6 columns
+
+mul $t3, $t1, 6
+add $t3, $t3, $t2
+sll $t3, $t3, 2            # bytes
+
+# load match_grid[row][col]
+la $t4, matching_grid
+add $t4, $t4, $t3
+lw $t5, 0($t4)
+bne $t5, $t7, SkipCell
+
+lw $t8, borderX0
+addi $t8, $t8, 1
+add $t8, $t8, $t2          # final x
+
+# compute y = row + borderY0 + 1
+lw $t4, borderY0
+addi $t4, $t4, 1
+add  $t4, $t4, $t1          # final y
+
+# idx = y * 32 + x
+li $t5, 32
+mul $t5, $t4, $t5
+add $t5, $t5, $t8
+sll $t5, $t5, 2            # bytes
+add $t5, $t9, $t5
+
+sw $t6, 0($t5)
+lw $s3, removed_count
+addi $s3, $s3, 1
+sw $s3, removed_count
+
+
+la $t4, matching_grid      
+addu $t4, $t4, $t3   # grid + offset
+sw $zero, 0($t4)   # store 0 into that cell
+#match_flag = 1
+li $s2, 1
+sw $s2, match_flag
+
+SkipCell:
+addi $t2, $t2, 1
+j ColLoop_Delete
+
+NextRow_Delete:
+addi $t1, $t1, 1
+j RowLoop_Delete
+
+Done_Delete:
+jr $ra
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~ ApplyGravity ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+ApplyGravity:
+addiu $sp, $sp, -4
+sw $ra, 0($sp)
+lw $t9, displayAddress 
+
+lw $t0, borderX0
+addi $t0, $t0, 1              # X = left inner border
+
+lw $t1, borderY0
+addi $t1, $t1, 1              # Y = top inner border
+li $t2, 0                   # col = 0
+
+Gravity_ColLoop:
+bge  $t2, 6, Gravity_DoneCols # only 6 columns (0 - 5)
+
+# x = X + col
+add $t3, $t0, $t2            # screen x for this column
+
+li $t4, 23                  # writeRow = bottom grid row
+li $t5, 23                  # scanRow = bottom grid row
+
+Gravity_ScanLoop:
+bltz $t5, Gravity_FillBlanks  # when scanRow < 0, start clearing above
+
+# y = Y + scanRow  (screen y)
+add  $t8, $t1, $t5
+
+li $t7, 32
+mul $t7, $t8, $t7            # y * 32
+add $t7, $t7, $t3            # + x
+sll $t7, $t7, 2              # *4 bytes
+addu $t6, $t9, $t7            
+
+lw   $t8, 0($t6)              # colour at (scanRow, col)
+beq  $t8, $zero, Gravity_NextScan   # if empty, move scanRow up
+beq  $t5, $t4, Gravity_SameRow
+
+add  $t8, $t1, $t4
+li   $t7, 32
+mul  $t7, $t8, $t7            # yDest * 32
+add  $t7, $t7, $t3            # + x
+sll  $t7, $t7, 2
+addu $t7, $t9, $t7            # t7 = destination
+
+# Move colour down and clear old spot
+lw $t8, 0($t6)              # reload colour
+sw $t8, 0($t7)              
+sw $zero, 0($t6)           
+
+addi $t4, $t4, -1             # writeRow--
+addi $t5, $t5, -1             # scanRow--
+j Gravity_ScanLoop
+
+Gravity_SameRow:
+addi $t4, $t4, -1             # writeRow--
+addi $t5, $t5, -1             # scanRow--
+j    Gravity_ScanLoop
+
+Gravity_NextScan:
+addi $t5, $t5, -1
+j Gravity_ScanLoop
+
+Gravity_FillBlanks:
+bltz $t4, Gravity_NextCol     # when writeRow < 0, this column is done
+
+# y = Y + writeRow
+add $t8, $t1, $t4
+li $t7, 32
+mul $t7, $t8, $t7
+add $t7, $t7, $t3
+sll $t7, $t7, 2
+addu $t7, $t9, $t7            # destination
+
+sw $zero, 0($t7)            # ensure cell is empty
+addi $t4, $t4, -1
+j Gravity_FillBlanks
+
+Gravity_NextCol:
+addi $t2, $t2, 1              # col++
+j Gravity_ColLoop
+
+Gravity_DoneCols:
+lw $ra, 0($sp)
+addiu $sp, $sp, 4
+jr $ra
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~ DigitSelect ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+DrawDigit_Select:
+beq $t4, 0, DrawDigit0
+beq $t4, 1, DrawDigit1
+beq $t4, 2, DrawDigit2
+beq $t4, 3, DrawDigit3
+beq $t4, 4, DrawDigit4
+beq $t4, 5, DrawDigit5
+beq $t4, 6, DrawDigit6
+beq $t4, 7, DrawDigit7
+beq $t4, 8, DrawDigit8
+beq $t4, 9, DrawDigit9
+jr $ra
+
+
+DrawDigit0:
+addiu $sp,$sp,-4
+sw $ra,0($sp)
+
+lw $t0, displayAddress
+addu $t0, $t0, $a0
+sw $a1, 0($t0)
+sw $a1, 4($t0)
+sw $a1, 8($t0)
+
+sw $a1, 128($t0)
+sw $a1, 136($t0)
+
+sw $a1, 256($t0)
+sw $a1, 264($t0)
+
+sw $a1, 384($t0)
+sw $a1, 392($t0)
+
+sw $a1, 512($t0)
+sw $a1, 516($t0)
+sw $a1, 520($t0)
+
+lw $ra,0($sp)
+addiu $sp,$sp,4
+jr $ra
+
+DrawDigit1:
+addiu $sp,$sp,-4
+sw $ra,0($sp)
+lw $t0, displayAddress
+addu $t0,$t0,$a0
+
+sw $a1, 4($t0)
+
+sw $a1, 128($t0)
+sw $a1, 132($t0)
+
+sw $a1, 260($t0)
+
+sw $a1, 388($t0)
+
+sw $a1, 512($t0)
+sw $a1, 516($t0)
+sw $a1, 520($t0)
+
+lw $ra,0($sp)
+addiu $sp,$sp,4
+jr $ra
+
+DrawDigit2:
+addiu $sp,$sp,-4
+sw $ra,0($sp)
+lw $t0, displayAddress
+addu $t0,$t0,$a0
+
+sw $a1, 0($t0)
+sw $a1, 4($t0)
+sw $a1, 8($t0)
+
+sw $a1, 136($t0)
+
+sw $a1, 256($t0)
+sw $a1, 260($t0)
+sw $a1, 264($t0)
+
+sw $a1, 384($t0)
+
+sw $a1, 512($t0)
+sw $a1, 516($t0)
+sw $a1, 520($t0)
+
+lw $ra,0($sp)
+addiu $sp,$sp,4
+jr $ra
+
+DrawDigit3:
+addiu $sp,$sp,-4
+sw $ra,0($sp)
+lw $t0,displayAddress
+addu $t0,$t0,$a0
+
+sw $a1, 0($t0)
+sw $a1, 4($t0)
+sw $a1, 8($t0)
+
+sw $a1,136($t0)
+
+sw $a1,256($t0)
+sw $a1,260($t0)
+sw $a1,264($t0)
+
+sw $a1,392($t0)
+
+sw $a1,512($t0)
+sw $a1,516($t0)
+sw $a1,520($t0)
+
+lw $ra,0($sp)
+addiu $sp,$sp,4
+jr $ra
+
+DrawDigit4:
+addiu $sp,$sp,-4
+sw $ra,0($sp)
+lw $t0,displayAddress
+addu $t0,$t0,$a0
+
+sw $a1, 0($t0)
+sw $a1, 8($t0)
+
+sw $a1, 128($t0)
+sw $a1, 136($t0)
+
+sw $a1, 256($t0)
+sw $a1, 260($t0)
+sw $a1, 264($t0)
+
+sw $a1, 392($t0)
+
+sw $a1, 520($t0)
+
+lw $ra,0($sp)
+addiu $sp,$sp,4
+jr $ra
+
+
+DrawDigit5:
+addiu $sp,$sp,-4
+sw $ra,0($sp)
+lw $t0,displayAddress
+addu $t0,$t0,$a0
+
+sw $a1,0($t0)
+sw $a1,4($t0)
+sw $a1,8($t0)
+    
+sw $a1,128($t0)
+
+sw $a1,256($t0)
+sw $a1,260($t0)
+sw $a1,264($t0)
+
+sw $a1,392($t0)
+
+sw $a1,512($t0)
+sw $a1,516($t0)
+sw $a1,520($t0)
+
+lw $ra,0($sp)
+addiu $sp,$sp,4
+jr $ra
+
+DrawDigit6:
+addiu $sp,$sp,-4
+sw $ra,0($sp)
+lw $t0,displayAddress
+addu $t0,$t0,$a0
+
+sw $a1, 0($t0)
+sw $a1, 4($t0)
+sw $a1, 8($t0)
+
+sw $a1,128($t0)
+
+sw $a1,256($t0)
+sw $a1,260($t0)
+sw $a1,264($t0)
+
+sw $a1,384($t0)
+sw $a1,392($t0)
+
+sw $a1,512($t0)
+sw $a1,516($t0)
+sw $a1,520($t0)
+
+lw $ra,0($sp)
+addiu $sp,$sp,4
+jr $ra
+
+
+DrawDigit7:
+addiu $sp,$sp,-4
+sw $ra,0($sp)
+lw $t0,displayAddress
+addu $t0,$t0,$a0
+
+sw $a1,0($t0)
+sw $a1,4($t0)
+sw $a1,8($t0)
+
+sw $a1,136($t0)
+
+sw $a1,264($t0)
+
+sw $a1,392($t0)
+
+sw $a1,520($t0)
+
+lw $ra,0($sp)
+addiu $sp,$sp,4
+jr $ra
+
+DrawDigit8:
+addiu $sp,$sp,-4
+sw $ra,0($sp)
+lw $t0,displayAddress
+addu $t0,$t0,$a0
+
+sw $a1,0($t0)
+sw $a1,4($t0)
+sw $a1,8($t0)
+
+sw $a1,128($t0)
+sw $a1,136($t0)
+
+sw $a1,256($t0)
+sw $a1,260($t0)
+sw $a1,264($t0)
+
+sw $a1,384($t0)
+sw $a1,392($t0)
+
+sw $a1,512($t0)
+sw $a1,516($t0)
+sw $a1,520($t0)
+
+lw $ra,0($sp)
+addiu $sp,$sp,4
+jr $ra
+
+DrawDigit9:
+addiu $sp,$sp,-4
+sw $ra,0($sp)
+lw $t0,displayAddress
+addu $t0,$t0,$a0
+
+sw $a1,0($t0)
+sw $a1,4($t0)
+sw $a1,8($t0)
+
+sw $a1,128($t0)
+sw $a1,136($t0)
+
+sw $a1,256($t0)
+sw $a1,260($t0)
+sw $a1,264($t0)
+
+sw $a1,392($t0)
+
+sw $a1,512($t0)
+sw $a1,516($t0)
+sw $a1,520($t0)
+
+lw $ra,0($sp)
+addiu $sp,$sp,4
+jr $ra
+
+
+DrawScoreOnesDigit:
+addiu $sp, $sp, -40
+sw $ra, 36($sp)
+sw $t0, 32($sp)
+sw $t1, 28($sp)
+sw $t2, 24($sp)
+sw $t3, 20($sp)
+sw $t4, 16($sp)
+sw $t5, 12($sp)
+sw $t6,  8($sp)
+sw $t7,  4($sp)
+sw $t8,  0($sp)
+
+lw $t0, score
+li $t1, 10
+div $t0, $t1
+mfhi $t4            # ones digit (0–9)
+
+# clear 3×5 area 
+lw $t2, displayAddress
+li $t3, 2284
+addu $t2, $t2, $t3      
+
+move $t5, $zero             # black
+
+sw $t5, 0($t2)
+sw $t5, 4($t2)
+sw $t5, 8($t2)
+
+sw $t5, 128($t2)
+sw $t5, 132($t2)
+sw $t5, 136($t2)
+
+sw $t5, 256($t2)
+sw $t5, 260($t2)
+sw $t5, 264($t2)
+sw $t5, 384($t2)
+sw $t5, 388($t2)
+sw $t5, 392($t2)
+
+sw $t5, 512($t2)
+sw $t5, 516($t2)
+sw $t5, 520($t2)
+
+# Draw digit
+li $a0, 2284
+lw $a1, gameOverText
+jal DrawDigit_Select
+
+lw $t8, 0($sp)
+lw $t7, 4($sp)
+lw $t6, 8($sp)
+lw $t5, 12($sp)
+lw $t4, 16($sp)
+lw $t3, 20($sp)
+lw $t2, 24($sp)
+lw $t1, 28($sp)
+lw $t0, 32($sp)
+lw $ra, 36($sp)
+addiu $sp, $sp, 40
+
+jr $ra
+    
+
+DrawScoreTensDigit:
+addiu $sp, $sp, -40
+sw $ra, 36($sp)
+sw $t0, 32($sp)
+sw $t1, 28($sp)
+sw $t2, 24($sp)
+sw $t3, 20($sp)
+sw $t4, 16($sp)
+sw $t5, 12($sp)
+sw $t6,  8($sp)
+sw $t7,  4($sp)
+sw $t8,  0($sp)
+
+lw $t0, score
+li $t1, 10
+div $t0, $t1         # quotient = score / 10
+mflo $t0              # t0 = tens+ones combined
+
+li $t1, 10
+div $t0, $t1         # quotient = tens, remainder = ones
+mfhi $t4              # t4 = tens digit (0–9)
+
+# clear the 3×5 digit area
+lw $t2, displayAddress
+li $t3, 2268        # tens digit offset
+addu $t2, $t2, $t3
+
+move $t5, $zero       # black
+
+sw $t5, 0($t2)
+sw $t5, 4($t2)
+sw $t5, 8($t2)
+    
+sw $t5, 128($t2)
+sw $t5, 132($t2)
+sw $t5, 136($t2)
+
+sw $t5, 256($t2)
+sw $t5, 260($t2)
+sw $t5, 264($t2)
+
+sw $t5, 384($t2)
+sw $t5, 388($t2)
+sw $t5, 392($t2)
+
+sw $t5, 512($t2)
+sw $t5, 516($t2)
+sw $t5, 520($t2)
+
+li $a0, 2268          # starting offset
+lw $a1, gameOverText
+jal DrawDigit_Select
+
+lw $t8, 0($sp)
+lw $t7, 4($sp)
+lw $t6, 8($sp)
+lw $t5, 12($sp)
+lw $t4, 16($sp)
+lw $t3, 20($sp)
+lw $t2, 24($sp)
+lw $t1, 28($sp)
+lw $t0, 32($sp)
+lw $ra, 36($sp)
+addiu $sp, $sp, 40
+jr $ra
+
+
+#~~~~~~~~~~~~~~~~~~~~ DrawScoreHundredsDigit ~~~~~~~~~~~~~~~~~~~~#
+DrawScoreHundredsDigit:
+addiu $sp, $sp, -40
+sw $ra, 36($sp)
+sw $t0, 32($sp)
+sw $t1, 28($sp)
+sw $t2, 24($sp)
+sw $t3, 20($sp)
+sw $t4, 16($sp)
+sw $t5, 12($sp)
+sw $t6, 8($sp)
+sw $t7, 4($sp)
+sw $t8, 0($sp)
+
+lw $t0, score
+
+# divide by 100
+li $t1, 100
+div $t0, $t1
+mflo $t0     
+
+# digit = (score/100) % 10
+li $t1, 10
+div $t0, $t1
+mfhi $t4          # hundreds digit (0–9)
+
+# clear the 3×5 digit area
+lw $t2, displayAddress
+li $t3, 2252        # hundreds offset
+addu $t2, $t2, $t3
+move $t5, $zero   # black
+
+# row 0
+sw $t5, 0($t2)
+sw $t5, 4($t2)
+sw $t5, 8($t2)
+
+# row 1
+sw $t5, 128($t2)
+sw $t5, 132($t2)
+sw $t5, 136($t2)
+
+# row 2
+sw $t5, 256($t2)
+sw $t5, 260($t2)
+sw $t5, 264($t2)
+
+# row 3
+sw $t5, 384($t2)
+sw $t5, 388($t2)
+sw $t5, 392($t2)
+
+# row 4
+sw $t5, 512($t2)
+sw $t5, 516($t2)
+sw $t5, 520($t2)
+
+# draw digit
+li $a0, 2252         # offset for hundreds
+lw $a1, gameOverText
+jal DrawDigit_Select   # uses t4 as digit
+
+lw $t8, 0($sp)
+lw $t7, 4($sp)
+lw $t6, 8($sp)
+lw $t5, 12($sp)
+lw $t4, 16($sp)
+lw $t3, 20($sp)
+lw $t2, 24($sp)
+lw $t1, 28($sp)
+lw $t0, 32($sp)
+lw $ra, 36($sp)
+addiu $sp, $sp, 40
+jr $ra
+

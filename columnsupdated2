@@ -1,0 +1,911 @@
+################# CSC258 Assembly Final Project ###################
+######################## Bitmap Display Configuration ########################
+# - Unit width in pixels:       256
+# - Unit height in pixels:      256
+# - Display width in pixels:    8
+# - Display height in pixels:   8
+# - Base Address for Display:   0x10008000 ($gp)
+##############################################################################
+
+.data
+displayAddress:     .word 0x10008000
+keyboardAddress:    .word 0xffff0000
+gameOverBackground: .word 0x1D1A31
+gameOverText:       .word 0xF08CAE
+retryText:          .word 0xC1A5A9
+
+#colours
+beige:              .word 0xEEE0CB
+periwinkle:         .word 0x7D80DA
+wisteria:           .word 0xB0A3D4
+pink:               .word 0xF45B69
+amaranth:           .word 0x89043D
+mauve:              .word 0x6E4555
+borderColour:       .word 0x474350
+
+borderX0:           .word 2
+borderY0:           .word 9
+
+blocksStartX:       .word 5
+blocksX:            .word 5
+blocksStartY:       .word 10
+blocksY:            .word 10
+
+COLS:               .word 6
+ROWS:               .word 13
+grid:               .space 312
+match_grid:         .space 312
+
+paused:             .word 0 # 0 = running, 1 = paused
+screen_backup:      .space 4096
+
+##############################################################################
+# Code
+##############################################################################
+.text
+Main:
+j Initialization
+
+Initialization:
+lw $t0, blocksStartX
+sw $t0, blocksX
+lw $t0, blocksStartY
+sw $t0, blocksY
+jal DrawBorder
+#score title
+#start page
+jal DrawPixel
+jal MainLoop
+
+MainLoop:
+jal CheckKeyboard
+jal Sleep
+j MainLoop
+
+
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Sleep ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+Sleep:
+li $v0, 32 		       	   # Sleep
+li $a0, 16 		   	       # Sleep for 16 ms = 1/60 s
+syscall
+jr $ra
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ CheckKeyboard ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+CheckKeyboard:
+lw $t0, keyboardAddress  
+lw $t1, 0($t0)       
+bne $t1, 1, NoKey           # if not pressed, just return
+
+CheckInput:
+addi $t0, $t0, 4           
+lw $t2, 0($t0)            
+beq $t2, 0x71, PressQ       # q is pressed
+beq $t2, 0x77, PressW	    # w is pressed
+beq $t2, 0x61, PressA		# a is pressed
+beq $t2, 0x73, PressS		# s is pressed
+beq $t2, 0x64, PressD		# d is pressed
+beq $t2, 0x72, PressR
+beq $t2, 0x70, PressP
+jr $ra                      # other key = ignore and return
+
+PressQ:
+li $v0, 10                  # Quit gracefully
+syscall
+
+PressR:
+jal ClearScreen
+
+
+PressP:
+jal SaveScreen
+jal PausedScreen
+jal RestoreScreen
+jr $ra
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ SaveScreen ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+SaveScreen:
+lw $t0, displayAddress      # t0 = 0x10008000
+la $t1, screen_backup       # t1 = &screen_backup[0]
+li $t2, 1024 
+
+SaveScreen_loop:
+lw $t3, 0($t0)              # read pixel from display
+sw $t3, 0($t1)              # store into backup
+
+addi $t0, $t0, 4              # next display word
+addi $t1, $t1, 4              # next backup word
+addi $t2, $t2, -1
+bgtz $t2, SaveScreen_loop
+
+jr $ra
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~ RestoreScreen ~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+RestoreScreen:
+la $t0, screen_backup       # t0 = src (backup)
+lw $t1, displayAddress      # t1 = dest (display base)
+li $t2, 1024
+
+RestoreScreen_loop:
+lw $t3, 0($t0)              # read from backup
+sw $t3, 0($t1)              # write to display
+
+addi $t0, $t0, 4
+addi $t1, $t1, 4
+addi $t2, $t2, -1
+bgtz $t2, RestoreScreen_loop
+
+jal MainLoop
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~ ClearScreen ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+ClearScreen:
+lw $t0, displayAddress
+li $t1, 0x000000
+li $t2, 1024
+jal ClearScreenLoop
+
+ClearScreenLoop:
+sw $t1, 0($t0)
+addi $t0, $t0, 4
+addi $t2, $t2, -1
+bgtz $t2, ClearScreenLoop
+
+jal Main
+    
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Rotate (W) ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+PressW:
+# rotate the colours downwards
+lw $t0, displayAddress
+lw $t1, blocksY             # current y
+li $t2, 32
+mul $t1, $t1, $t2           # t1 = y * 32
+
+lw $t3, blocksX             # current x
+add $t1, $t1, $t3           # t1 = y * 32 + x
+
+sll $t1, $t1, 2             #get the byte value     
+addu $t0, $t0, $t1           #add it display address
+
+# Current colours
+lw $t4, 0($t0)              # top colour
+lw $t5, 128($t0)            # middle; 128 pixels
+lw $t6, 256($t0)            # bottom; 256 pixels
+
+# Rotate up
+sw $t6, 0($t0)              # new top = previous bottom
+sw $t4, 128($t0)            # new middle = previous top
+sw $t5, 256($t0)            # new bottom = previous middle
+
+jr $ra
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Move Left (A) ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+PressA:
+lw $t4, blocksX             # current x
+lw $t5, blocksY             # current y
+
+# left inner limit: borderX0 + 1
+lw $t7, borderX0
+addi $t7, $t7, 1  
+
+# If at left inner limit
+beq $t4, $t7, PressA_End
+
+lw $t0, displayAddress      # $t0 = 0x10008000
+
+# Find old column address to erase + colour copy
+li $t1, 32
+mul $t2, $t5, $t1           # t2 = y * 32
+add $t2, $t2, $t4           # t2 = y*32 + x
+sll $t2, $t2, 2              
+addu $t3, $t0, $t2          # t3 = address of top old block
+
+# check cell to the left of each gem:
+# left of top pixel
+addiu $t6, $t3, -4          # top pixel one pixel left (-4)
+lw $t7, 0($t6)
+bne $t7, $zero, PressA_End  # something there
+
+# left of middle pixel
+addiu $t6, $t3, 124         # middle pixel one left (128 + (-4) = 124)
+lw $t7, 0($t6)
+bne $t7, $zero, PressA_End
+
+# left of bottom pixel
+addiu $t6, $t3, 252         # bottom pixel one left (256 + (-4) = 252)
+lw $t7, 0($t6)
+bne $t7, $zero, PressA_End
+
+
+# Read current colours
+lw $t8, 0($t3)              # top
+lw $t9, 128($t3)            # middle
+lw $s1, 256($t3)            # bottom
+
+# Erase old column by colouring it black
+move $s0, $zero
+sw $s0, 0($t3)
+sw $s0, 128($t3)
+sw $s0, 256($t3)
+
+# update current x to x = x - 1
+addi $t4, $t4, -1
+sw $t4, blocksX
+
+# Compute new column address and redraw colours 
+li $t1, 32
+mul $t2, $t5, $t1           # t2 = y * 32
+add $t2, $t2, $t4           # t2 = y * 32 + newX
+sll $t2, $t2, 2        
+addu $t3, $t0, $t2          # t3 = address of top new block
+
+sw $t8, 0($t3)            # top = old top
+sw $t9, 128($t3)            # mid = old mid
+sw $s1, 256($t3)            # bottom = old bottom
+
+PressA_End:
+jr $ra
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Move Down (S) ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+PressS:
+lw $t4, blocksX             # current x
+lw $t5, blocksY             # current y
+ 
+# Compute lower limit: borderY0 + 11
+lw $t7, borderY0
+addi $t7, $t7, 11  
+
+# If at bottom limit
+beq $t5, $t7, PressS_End
+
+lw $t0, displayAddress 
+
+# Find old column address and erase and copy colours
+li $t1, 32
+mul $t2, $t5, $t1           # t2 = y * 32
+add $t2, $t2, $t4           # t2 = y * 32 + x
+sll $t2, $t2, 2         
+addu $t3, $t0, $t2          # t3 = address of top old block
+
+# check if there is a gem below
+addiu $t6, $t3, 384         # 3 * 128 = 3 rows down
+lw $t7, 0($t6)              #check what is underneath
+bne $t7, $zero, PressS_End
+
+# Read current colours
+lw $t8, 0($t3)              # top
+lw $t9, 128($t3)            # middle
+lw $s1, 256($t3)            # bottom
+
+# Erase old column by colouring black
+move $s0, $zero
+sw $s0, 0($t3)
+sw $s0, 128($t3)
+sw $s0, 256($t3)
+
+# Update y value to be y = y + 1
+addi $t5, $t5, 1         
+sw $t5, blocksY
+
+# Get new address for the column and redraw it
+li $t1, 32
+mul $t2, $t5, $t1           # t2 = y * 32
+add $t2, $t2, $t4           # t2 = y * 32 + newX
+sll $t2, $t2, 2  
+addu $t3, $t0, $t2          # t3 = address of top new block
+
+sw $t8, 0($t3)              # top = old top
+sw $t9, 128($t3)            # mid = old mid
+sw $s1, 256($t3)            # bottom = old bottom
+jr $ra
+    
+PressS_End:
+lw $t4, blocksStartX      # x_spawn
+lw $t5, blocksStartY      # y_spawn
+
+lw $t0, displayAddress 
+    
+# Compute address of top spawn cell
+li $t1, 32
+mul $t2, $t5, $t1          # t2 = y * 32
+add $t2, $t2, $t4          # t2 = y*32 + x
+sll $t2, $t2, 2            
+addu $t3, $t0, $t2          # t3 = addr of top spawn pixel
+
+lw $t6, 0($t3)          # top
+lw $t7, 128($t3)          # middle
+lw $t8, 256($t3)          # bottom
+
+# If any is non-zero  = game over
+or $t9, $t6, $t7
+or $t9, $t9, $t8
+bne $t9, $zero, GameOver
+
+
+#reading the columns that are at the bottom
+lw $t4, blocksX          # x
+lw $t5, blocksY          # y
+
+lw $t0, displayAddress   # base again
+li $t1, 32
+mul $t2, $t5, $t1         # y * 32
+add $t2, $t2, $t4         # y*32 + x
+sll $t2, $t2, 2
+addu $t3, $t0, $t2         # address of top landed gem
+
+# Read final column colours
+lw $t6, 0($t3)         # top gem colour
+lw $t7, 128($t3)         # middle
+lw $t8, 256($t3)         # bottom
+
+lw $t0, blocksStartX
+sw $t0, blocksX
+lw $t0, blocksStartY
+sw $t0, blocksY
+jal DrawPixel
+
+jr   $ra
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Move Right (D) ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+PressD:
+lw $t4, blocksX     #current x
+lw $t5, blocksY     #current y
+
+# Compute right limit
+lw $t7, borderX0
+addi $t7, $t7, 6  
+
+# If at limit end the call
+beq $t4, $t7, PressD_End
+
+lw $t0, displayAddress  
+
+# get old column and erase and redraw it
+li $t1, 32
+mul $t2, $t5, $t1             # t2 = y * 32
+add $t2, $t2, $t4             # t2 = y*32 + x
+sll $t2, $t2, 2         
+addu $t3, $t0, $t2             # t3 = address of top old block
+
+
+# check to see if there is a column to the right
+# right of top block
+addiu $t6, $t3, 4             # one pixel right
+lw $t7, 0($t6)
+bne $t7, $zero, PressD_End   #cant move
+
+# rught of middle block
+addiu $t6, $t3, 132          # one row down, one left
+lw $t7, 0($t6)
+bne $t7, $zero, PressD_End
+
+# right of bottom block
+addiu $t6, $t3, 260          # two rows down, one left
+lw $t7, 0($t6)
+bne $t7, $zero, PressD_End
+
+# Read current colours
+lw   $t8,   0($t3)             # top
+lw   $t9, 128($t3)             # middle
+lw   $s1, 256($t3)             #bottom
+
+# Erase old column by colouring it black
+move $s0, $zero
+sw $s0, 0($t3)
+sw $s0, 128($t3)
+sw $s0, 256($t3)
+
+# update current x value
+addi $t4, $t4, 1              # x = x + 1
+sw $t4, blocksX
+
+# find new column address and redraw ti
+li $t1, 32
+mul $t2, $t5, $t1             # t2 = y * 32
+add $t2, $t2, $t4             # t2 = y * 32 + newX
+sll $t2, $t2, 2             
+addu $t3, $t0, $t2        
+
+sw $t8, 0($t3)             # top = old top
+sw $t9, 128($t3)             # middle = old middle
+sw $s1, 256($t3)             # bottom = old bottom
+
+PressD_End:
+jr $ra
+
+NoKey:
+jr  $ra
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ DrawBorder ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+DrawBorder:
+lw $t0, displayAddress   # t0 = 0x10008000
+lw $v1, borderColour     # v1 = border colour
+
+# Load top-left cell (x0, y0) of border
+lw $t2, borderX0            # t2 = x0 
+lw $t3, borderY0            # t3 = y0
+
+# Compute address of (x0, y0)
+li $t4, 32
+mul $t5, $t3, $t4            # t5 = y0 * 32
+add $t5, $t5, $t2            # t5 = y0 * 32 + x0
+
+sll $t5, $t5, 2              # t5 = index * 4
+addu $t6, $t0, $t5           # t6 = pointer to (x0, y0) for current row
+
+li $t7, 0                    # row counter; 15 rows total
+
+RowLoop_8x15:
+beq $t7, 15, BorderDone     # if row == 15 → done
+
+# top (row 0) or bottom (row 14) → full row of 8 border pixels
+beq $t7, $zero, FullRow
+li $t8, 14
+beq $t7, $t8, FullRow
+
+# middle rows: no middle
+sw $v1, 0($t6)               # left border at x0
+addiu $t9, $t6, 28           # right border at x0 + 7; offset 7 * 4 = 28 bytes
+sw $v1, 0($t9)
+j AfterRow_8x15
+
+# top and bottom rows
+FullRow:
+move $t9, $t6                # t9 = current pixel in row
+li $t8, 0                    # column counter 0..7
+
+FullRowLoop:
+beq $t8, 8, AfterRow_8x15
+sw $v1, 0($t9)
+addiu $t9, $t9, 4             # next pixel (4 bytes)
+addiu $t8, $t8, 1
+j FullRowLoop
+
+# next row
+AfterRow_8x15:
+addiu $t6, $t6, 128           # move down one row (32 * 4 bytes)
+addiu $t7, $t7, 1             # row++
+j RowLoop_8x15
+
+BorderDone:
+jr $ra
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ RandomColour ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+
+RandomColour:
+li $v0, 42            # syscall 42: random int
+li $a0, 0             # lower bound
+li $a1, 6             # upper bound (exclusive) → 0..5
+syscall                 # result in $a0
+
+move $t1, $a0           # $t1 = random index
+
+beq $t1, $zero, Beige       # 0 = beige
+li $t2, 1
+beq $t1, $t2, Periwinkle    # 1 = periwinkle
+li $t2, 2
+beq $t1, $t2, Wisteria      # 2 = wisteria
+li $t2, 3
+beq $t1, $t2, Pink          # 3 = pink
+li $t2, 4
+beq $t1, $t2, Amaranth      # 4 = amaranth
+j Mauve                   # if none of the above, must be 5:
+
+Beige:
+lw $v0, beige
+jr $ra
+
+Periwinkle:
+lw $v0, periwinkle
+jr $ra
+
+Wisteria:
+lw $v0, wisteria
+jr $ra
+
+Pink:
+lw $v0, pink
+jr $ra
+
+Amaranth:
+lw $v0, amaranth
+jr $ra
+
+Mauve:
+lw $v0, mauve
+jr $ra
+
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ DrawPixels ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+DrawPixel:
+# Load display base address
+lw $t0, displayAddress      # t0 = 0x10008000
+
+# Load current column top position (x, y)
+lw $t4, blocksX             # x
+lw $t5, blocksY             # y
+
+# index = y * 32 + x
+li $t1, 32
+mul $t2, $t5, $t1            # t2 = y * 32
+add $t2, $t2, $t4            # t2 = y*32 + x
+sll $t2, $t2, 2              # * 4 bytes
+addu $t0, $t0, $t2            # t0 = addr of top pixel of column
+
+# Draw exactly 3 random-coloured pixels downward
+li $s0, 0
+
+PixelLoop:
+beq  $s0, 3, DonePixels       # stop after 3 blocks
+jal  RandomColour             # $v0 = colour
+sw $v0, 0($t0)              # paint pixel
+addiu $t0, $t0, 128           # move down one row (32 * 4)
+addiu $s0, $s0, 1
+j PixelLoop
+
+DonePixels:
+jal MainLoop
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Paused ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+# PausedLoop:
+# lw $t0, keyboardAddress  
+# lw $t1, 0($t0)       
+# bne $t1, 1, PausedLoop
+# addi $t0, $t0, 4           
+# lw $t2, 0($t0)
+# beq $t2, 0x70, unpause #p is pressed
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ PausedScreen ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+PausedScreen:
+lw $t0, displayAddress
+lw $t4, gameOverBackground
+lw $t5, gameOverText
+li $t1, 0
+LoopPause:
+sw $t4, 0($t0)
+addi $t0, $t0, 4
+beq $t0, 0x10009000, Pause
+jal LoopPause
+
+Pause:
+lw $t0, displayAddress
+sw $t5, 820($t0)
+sw $t5, 824($t0)
+sw $t5, 836($t0)
+sw $t5, 840($t0)
+
+sw $t5, 948($t0)
+sw $t5, 952($t0)
+sw $t5, 964($t0)
+sw $t5, 968($t0)
+
+sw $t5, 1076($t0)
+sw $t5, 1080($t0)
+sw $t5, 1092($t0)
+sw $t5, 1096($t0)
+
+sw $t5, 1204($t0)
+sw $t5, 1208($t0)
+sw $t5, 1220($t0)
+sw $t5, 1224($t0)
+
+sw $t5, 1332($t0)
+sw $t5, 1336($t0)
+sw $t5, 1348($t0)
+sw $t5, 1352($t0)
+
+sw $t5, 1460($t0)
+sw $t5, 1464($t0)
+sw $t5, 1476($t0)
+sw $t5, 1480($t0)
+
+sw $t5, 1588($t0)
+sw $t5, 1592($t0)
+sw $t5, 1604($t0)
+sw $t5, 1608($t0)
+
+sw $t5, 1716($t0)
+sw $t5, 1720($t0)
+sw $t5, 1732($t0)
+sw $t5, 1736($t0)
+
+sw $t5, 2188($t0)
+sw $t5, 2192($t0)
+sw $t5, 2208($t0)
+sw $t5, 2212($t0)
+sw $t5, 2224($t0)
+sw $t5, 2236($t0)
+sw $t5, 2248($t0)
+sw $t5, 2252($t0)
+sw $t5, 2256($t0)
+sw $t5, 2268($t0)
+sw $t5, 2272($t0)
+sw $t5, 2280($t0)
+sw $t5, 2284($t0)
+sw $t5, 2288($t0)
+sw $t5, 2312($t0)
+sw $t5, 2324($t0)
+sw $t5, 2332($t0)
+sw $t5, 2344($t0)
+sw $t5, 2352($t0)
+sw $t5, 2364($t0)
+sw $t5, 2372($t0)
+sw $t5, 2392($t0)
+sw $t5, 2408($t0)
+sw $t5, 2420($t0)
+sw $t5, 2440($t0)
+sw $t5, 2452($t0)
+sw $t5, 2460($t0)
+sw $t5, 2472($t0)
+sw $t5, 2480($t0)
+sw $t5, 2492($t0)
+sw $t5, 2500($t0)
+sw $t5, 2520($t0)
+sw $t5, 2536($t0)
+sw $t5, 2548($t0)
+sw $t5, 2568($t0)
+sw $t5, 2580($t0)
+sw $t5, 2588($t0)
+sw $t5, 2600($t0)
+sw $t5, 2608($t0)
+sw $t5, 2620($t0)
+sw $t5, 2632($t0)
+sw $t5, 2636($t0)
+sw $t5, 2648($t0)
+sw $t5, 2652($t0)
+sw $t5, 2656($t0)
+sw $t5, 2664($t0)
+sw $t5, 2676($t0)
+sw $t5, 2696($t0)
+sw $t5, 2700($t0)
+sw $t5, 2704($t0)
+sw $t5, 2716($t0)
+sw $t5, 2720($t0)
+sw $t5, 2724($t0)
+sw $t5, 2728($t0)
+sw $t5, 2736($t0)
+sw $t5, 2748($t0)
+sw $t5, 2768($t0)
+sw $t5, 2776($t0)
+sw $t5, 2792($t0)
+sw $t5, 2804($t0)
+sw $t5, 2824($t0)
+sw $t5, 2844($t0)
+sw $t5, 2856($t0)
+sw $t5, 2864($t0)
+sw $t5, 2876($t0)
+sw $t5, 2896($t0)
+sw $t5, 2904($t0)
+sw $t5, 2920($t0)
+sw $t5, 2932($t0)
+sw $t5, 2952($t0)
+sw $t5, 2972($t0)
+sw $t5, 2984($t0)
+sw $t5, 2996($t0)
+sw $t5, 3000($t0)
+sw $t5, 3012($t0)
+sw $t5, 3016($t0)
+sw $t5, 3020($t0)
+sw $t5, 3036($t0)
+sw $t5, 3040($t0)
+sw $t5, 3048($t0)
+sw $t5, 3052($t0)
+sw $t5, 3056($t0)
+
+PauseWait:
+lw $t7, keyboardAddress
+lw $t8, 0($t7)
+beq $t8, $zero, PauseWait
+lw $t9, 4($t7)
+
+#p = unpause
+li $s0, 0x70            # 'p'
+beq  $t9, $s0, PauseExit
+
+# r = restart when paused
+li $s0, 0x72                # 'r'
+beq  $t9, $s0, PressR
+
+# q = quit when paused
+li $s0, 0x71                # 'q'
+beq $t9, $s0, PressQ
+
+j PauseWait
+
+PauseExit:
+jal RestoreScreen
+
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ GameOver ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+GameOver:
+li $v0, 10
+jal GameOverScreen
+syscall
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~ GameOverScreen ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+GameOverScreen:
+lw $t0, displayAddress
+lw $t4, gameOverBackground
+lw $t5, gameOverText
+lw $t6, retryText
+li $t1, 0
+LoopGameOver:
+sw $t4, 0($t0)
+addi $t0, $t0, 4
+beq $t0, 0x10009000, Game
+jal LoopGameOver
+
+Game:
+lw $t0, displayAddress
+sw $t5, 412($t0)
+sw $t5, 416($t0)
+sw $t5, 432($t0)
+sw $t5, 436($t0)
+sw $t5, 452($t0)
+sw $t5, 460($t0)
+sw $t5, 476($t0)
+sw $t5, 480($t0)
+sw $t5, 536($t0)
+sw $t5, 556($t0)
+sw $t5, 568($t0)
+sw $t5, 576($t0)
+sw $t5, 584($t0)
+sw $t5, 592($t0)
+sw $t5, 600($t0)
+sw $t5, 664($t0)
+sw $t5, 684($t0)
+sw $t5, 696($t0)
+sw $t5, 704($t0)
+sw $t5, 712($t0)
+sw $t5, 720($t0)
+sw $t5, 728($t0)
+sw $t5, 792($t0)
+sw $t5, 800($t0)
+sw $t5, 804($t0)
+sw $t5, 812($t0)
+sw $t5, 824($t0)
+sw $t5, 832($t0)
+sw $t5, 848($t0)
+sw $t5, 856($t0)
+sw $t5, 860($t0)
+sw $t5, 864($t0)
+sw $t5, 920($t0)
+sw $t5, 932($t0)
+sw $t5, 940($t0)
+sw $t5, 944($t0)
+sw $t5, 948($t0)
+sw $t5, 952($t0)
+sw $t5, 960($t0)
+sw $t5, 976($t0)
+sw $t5, 984($t0)
+sw $t5, 1048($t0)
+sw $t5, 1060($t0)
+sw $t5, 1068($t0)
+sw $t5, 1080($t0)
+sw $t5, 1088($t0)
+sw $t5, 1104($t0)
+sw $t5, 1112($t0)
+sw $t5, 1180($t0)
+sw $t5, 1184($t0)
+sw $t5, 1196($t0)
+sw $t5, 1208($t0)
+sw $t5, 1216($t0)
+sw $t5, 1232($t0)
+sw $t5, 1244($t0)
+sw $t5, 1248($t0)
+
+Over:
+sw $t5, 1816($t0)
+sw $t5, 1820($t0)
+sw $t5, 1832($t0)
+sw $t5, 1848($t0)
+sw $t5, 1860($t0)
+sw $t5, 1864($t0)
+sw $t5, 1876($t0)
+sw $t5, 1880($t0)
+sw $t5, 1896($t0)
+sw $t5, 1940($t0)
+sw $t5, 1952($t0)
+sw $t5, 1960($t0)
+sw $t5, 1976($t0)
+sw $t5, 1984($t0)
+sw $t5, 2000($t0)
+sw $t5, 2012($t0)
+sw $t5, 2024($t0)
+sw $t5, 2068($t0)
+sw $t5, 2080($t0)
+sw $t5, 2088($t0)
+sw $t5, 2104($t0)
+sw $t5, 2112($t0)
+sw $t5, 2128($t0)
+sw $t5, 2140($t0)
+sw $t5, 2152($t0)
+sw $t5, 2196($t0)
+sw $t5, 2208($t0)
+sw $t5, 2220($t0)
+sw $t5, 2228($t0)
+sw $t5, 2240($t0)
+sw $t5, 2244($t0)
+sw $t5, 2248($t0)
+sw $t5, 2256($t0)
+sw $t5, 2260($t0)
+sw $t5, 2264($t0)
+sw $t5, 2280($t0)
+sw $t5, 2324($t0)
+sw $t5, 2336($t0)
+sw $t5, 2348($t0)
+sw $t5, 2356($t0)
+sw $t5, 2368($t0)
+sw $t5, 2384($t0)
+sw $t5, 2392($t0)
+sw $t5, 2408($t0)
+sw $t5, 2452($t0)
+sw $t5, 2464($t0)
+sw $t5, 2476($t0)
+sw $t5, 2484($t0)
+sw $t5, 2496($t0)
+sw $t5, 2512($t0)
+sw $t5, 2524($t0)
+sw $t5, 2584($t0)
+sw $t5, 2588($t0)
+sw $t5, 2608($t0)
+sw $t5, 2628($t0)
+sw $t5, 2632($t0)
+sw $t5, 2640($t0)
+sw $t5, 2652($t0)
+sw $t5, 2664($t0)
+
+
+Retry:
+sw $t6, 3276($t0)
+sw $t6, 3344($t0)
+sw $t6, 3348($t0)
+sw $t6, 3372($t0)
+sw $t6, 3376($t0)
+sw $t6, 3384($t0)
+sw $t6, 3388($t0)
+sw $t6, 3392($t0)
+sw $t6, 3400($t0)
+sw $t6, 3404($t0)
+sw $t6, 3408($t0)
+sw $t6, 3420($t0)
+sw $t6, 3424($t0)
+sw $t6, 3432($t0)
+sw $t6, 3440($t0)
+sw $t6, 3468($t0)
+sw $t6, 3496($t0)
+sw $t6, 3512($t0)
+sw $t6, 3516($t0)
+sw $t6, 3520($t0)
+sw $t6, 3532($t0)
+sw $t6, 3544($t0)
+sw $t6, 3560($t0)
+sw $t6, 3568($t0)
+sw $t6, 3596($t0)
+sw $t6, 3612($t0)
+sw $t6, 3616($t0)
+sw $t6, 3624($t0)
+sw $t6, 3640($t0)
+sw $t6, 3660($t0)
+sw $t6, 3672($t0)
+sw $t6, 3688($t0)
+sw $t6, 3696($t0)
+sw $t6, 3724($t0)
+sw $t6, 3752($t0)
+sw $t6, 3768($t0)
+sw $t6, 3772($t0)
+sw $t6, 3776($t0)
+sw $t6, 3788($t0)
+sw $t6, 3792($t0)
+sw $t6, 3800($t0)
+sw $t6, 3820($t0)
+sw $t6, 3824($t0)
+sw $t6, 3952($t0)
+sw $t6, 4072($t0)
+sw $t6, 4076($t0)
+sw $t6, 4080($t0)
+
+keyboardLoop:
+jal CheckKeyboard
+jal keyboardLoop
+
+
